@@ -43,6 +43,7 @@ jobs:
             **/.idea/**
             **/scratch/**
             **/uploads/**
+            **/images/logo.png
             **/db.local.example.php
             **/.env*
             **/Thumbs.db
