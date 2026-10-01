@@ -1,0 +1,49 @@
+name: Deploy PHP application
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Create server database configuration
+        env:
+          DB_HOST: ${{ secrets.DB_HOST }}
+          DB_NAME: ${{ secrets.DB_NAME }}
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_PASS: ${{ secrets.DB_PASS }}
+        run: |
+          php -r '$config = ["host" => getenv("DB_HOST"), "dbname" => getenv("DB_NAME"), "user" => getenv("DB_USER"), "pass" => getenv("DB_PASS"), "charset" => "utf8mb4"]; file_put_contents("php/db.local.php", "<?php\n\n// Generated during deployment; do not commit.\nreturn " . var_export($config, true) . ";\n");'
+
+      - name: Deploy via FTP
+        uses: SamKirkland/FTP-Deploy-Action@v4.4.0
+        with:
+          server: ${{ secrets.FTP_SERVER }}
+          username: ${{ secrets.FTP_USERNAME }}
+          password: ${{ secrets.FTP_PASSWORD }}
+          protocol: ftp
+          port: ${{ secrets.FTP_PORT }}
+          local-dir: ./
+          server-dir: ${{ secrets.FTP_SERVER_DIR }}
+          exclude: |
+            **/.git*/**
+            **/.github/**
+            **/.vscode/**
+            **/.idea/**
+            **/scratch/**
+            **/uploads/**
+            **/db.local.example.php
+            **/.env*
+            **/Thumbs.db
+            **/.DS_Store
