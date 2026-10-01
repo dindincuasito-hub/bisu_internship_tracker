@@ -1,0 +1,271 @@
+/* ── SUPERVISOR PAGE STYLES ── */
+
+/* Task Management */
+.task-form-row {
+  margin-bottom: 16px;
+}
+
+.task-form-row label {
+  font-size: 12px; font-weight: 600; color: var(--text2); margin-bottom: 6px; display: block;
+}
+
+.task-form-row input,
+.task-form-row textarea,
+.task-form-row select {
+  width: 100%;
+}
+
+/* Student List Enhancement */
+.student-filter-bar {
+  display: flex; gap: 12px; margin-bottom: 20px; flex-wrap: wrap;
+}
+
+.student-filter-bar .btn {
+  flex-shrink: 0;
+}
+
+.student-row-hover:hover {
+  background: var(--surface2);
+  cursor: pointer;
+}
+
+/* Performance indicators */
+.performance-good {
+  color: var(--green);
+}
+
+.performance-average {
+  color: var(--gold);
+}
+
+.performance-needs-improvement {
+  color: var(--red);
+}
+
+.skill-rating-group {
+  display: flex; gap: 6px; margin: 8px 0;
+}
+
+.skill-rating-btn {
+  padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border);
+  background: var(--surface2); color: var(--text3);
+  font-size: 12px; cursor: pointer; transition: all 0.15s;
+}
+
+.skill-rating-btn:hover,
+.skill-rating-btn.selected {
+  background: var(--teal); color: #fff; border-color: var(--teal);
+}
+
+/* Submission review styles */
+.submission-row {
+  display: grid; grid-template-columns: 1fr 1.5fr 1fr 0.8fr 0.8fr 1fr;
+  gap: 16px; align-items: center; padding: 12px 0; border-bottom: 1px solid var(--border);
+}
+
+.submission-row:last-child {
+  border-bottom: none;
+}
+
+.submission-actions {
+  display: flex; gap: 6px;
+}
+
+.submission-actions .btn {
+  font-size: 11px; padding: 4px 8px;
+}
+
+/* Attendance view */
+.attendance-filter {
+  display: flex; gap: 12px; margin-bottom: 20px;
+  align-items: center; flex-wrap: wrap;
+}
+
+.attendance-filter input[type="date"],
+.attendance-filter select {
+  padding: 8px 12px; border-radius: 8px; border: 1px solid var(--border);
+  font-size: 13px;
+}
+
+.attendance-export-btn {
+  margin-left: auto;
+}
+
+.attendance-stat {
+  display: flex; align-items: center; gap: 8px;
+}
+
+.attendance-stat .stat-value {
+  font-size: 24px; font-weight: 800;
+}
+
+.attendance-stat .stat-label {
+  font-size: 12px; color: var(--text3);
+}
+
+/* Profile section */
+.profile-section {
+  margin-bottom: 24px;
+}
+
+.profile-header {
+  display: flex; align-items: center; gap: 16px; margin-bottom: 16px;
+}
+
+.profile-avatar {
+  width: 48px; height: 48px; border-radius: 50%;
+  background: var(--teal); display: flex; align-items: center; justify-content: center;
+  font-size: 20px; color: #fff; font-weight: 700;
+}
+
+.profile-info h3 {
+  font-size: 16px; font-weight: 700; margin-bottom: 2px;
+}
+
+.profile-info p {
+  font-size: 12px; color: var(--text3);
+}
+
+.profile-info-row {
+  display: grid; grid-template-columns: 120px 1fr;
+  gap: 16px; align-items: center; padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.profile-info-row:last-child {
+  border-bottom: none;
+}
+
+.profile-info-label {
+  font-size: 12px; color: var(--text3); font-weight: 500;
+}
+
+.profile-info-value {
+  font-size: 13px; color: var(--text); font-weight: 600;
+}
+
+/* Task list enhancement */
+.task-list-item {
+  display: grid; grid-template-columns: 2fr 1.5fr 1fr 1fr auto;
+  gap: 16px; align-items: center; padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.task-list-item:last-child {
+  border-bottom: none;
+}
+
+.task-name {
+  font-weight: 600; font-size: 13px;
+}
+
+.task-assignee {
+  font-size: 12px; color: var(--text2);
+}
+
+.task-due {
+  font-size: 12px;
+}
+
+.task-submissions {
+  font-family: 'DM Mono', monospace; font-size: 12px;
+}
+
+/* Notification styles for supervisor */
+.sup-notif-item {
+  padding: 12px; border-radius: 8px; background: var(--surface2);
+  margin-bottom: 8px; border-left: 3px solid var(--teal);
+}
+
+.sup-notif-item.success {
+  border-left-color: var(--green);
+  background: rgba(14, 122, 90, 0.08);
+}
+
+.sup-notif-item.warning {
+  border-left-color: var(--amber);
+  background: rgba(184, 113, 10, 0.08);
+}
+
+.sup-notif-item.error {
+  border-left-color: var(--red);
+  background: rgba(192, 57, 43, 0.08);
+}
+
+.sup-notif-message {
+  font-size: 13px; font-weight: 600; color: var(--text);
+}
+
+.sup-notif-time {
+  font-size: 11px; color: var(--text3); margin-top: 4px;
+}
+
+/* Evaluation form */
+.evaluation-form {
+  display: flex; flex-direction: column; gap: 20px;
+}
+
+.evaluation-skill {
+  border-bottom: 1px solid var(--border); padding-bottom: 16px;
+}
+
+.evaluation-skill:last-child {
+  border-bottom: none;
+}
+
+.evaluation-skill-name {
+  font-size: 13px; font-weight: 600; margin-bottom: 8px;
+}
+
+.evaluation-stars {
+  display: flex; gap: 6px;
+}
+
+.evaluation-stars button {
+  width: 36px; height: 36px; border-radius: 6px; border: 1px solid var(--border);
+  background: var(--surface2); cursor: pointer; transition: all 0.15s;
+  display: flex; align-items: center; justify-content: center; font-size: 16px;
+}
+
+.evaluation-stars button:hover {
+  background: var(--teal); border-color: var(--teal);
+}
+
+.evaluation-stars button.selected {
+  background: var(--teal); border-color: var(--teal);
+}
+
+/* Responsive tweaks */
+@media (max-width: 1200px) {
+  .submission-row {
+    grid-template-columns: 1fr 1fr;
+  }
+  
+  .task-list-item {
+    grid-template-columns: 1fr 1fr;
+  }
+  
+  .attendance-filter {
+    flex-direction: column;
+  }
+  
+  .attendance-export-btn {
+    margin-left: 0;
+    width: 100%;
+  }
+}
+
+@media (max-width: 768px) {
+  .profile-info-row {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+  
+  .student-filter-bar {
+    flex-direction: column;
+  }
+  
+  .student-filter-bar .btn {
+    width: 100%;
+  }
+}

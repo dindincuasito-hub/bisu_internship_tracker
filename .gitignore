@@ -1,0 +1,14 @@
+# Local configuration and credentials
+php/db.local.php
+.env
+.env.*
+!.env.example
+
+# User-generated content
+uploads/
+
+# Editor and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<!-- Keep asset and API links valid whether this file is opened directly or served through a role route. -->
+<base href="./">
+<title>BISU–Calape | Digital Internship Tracker</title>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../css/styles.css?v=8">
+<link rel="stylesheet" href="../css/roles/student-additions.css">
+<link rel="stylesheet" href="../css/roles/supervisor-additions.css">
+<link rel="stylesheet" href="../css/roles/coordinator.css?v=9">
+<!-- Bootstrap Icons for face/camera icon in sidebar -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css">
+<!-- Bootstrap 5 CSS (used for redesigned Face Registration page) -->
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+</head>
+<body>
+
+<!-- ══════════════ LOGIN SCREEN ══════════════ -->
+<div id="login-screen">
+  <div class="login-header">
+    <img src="../images/logo.png" alt="BISU Logo" class="login-logo">
+    <div class="login-brand">
+      <h1>BISU–Calape Campus</h1>
+      <p>Bohol Island State University</p>
+    </div>
+  </div>
+  <div class="login-body">
+    <div class="login-card">
+      <h2 class="login-title">Digital Internship Tracker</h2>
+      <p class="login-sub">CTECH Department — OJT Management System</p>
+      <div class="role-select-wrap">
+        <div class="role-label">Select your role</div>
+        <select class="role-select" id="login-role" onchange="selectRole(this)">
+          <option value="student">🎓 Student — Intern</option>
+          <option value="coordinator">👩‍💼 Coordinator</option>
+          <option value="supervisor">🏢 Supervisor</option>
+          <option value="admin">🛠️ Admin</option>
+        </select>
+        <span class="role-select-arrow">▾</span>
+      </div>
+
+      <div class="login-fields">
+        <div>
+          <div class="field-label">Username</div>
+          <input class="field-input" id="login-username" type="text" placeholder="Enter your username">
+        </div>
+        <div>
+          <div class="field-label">Password</div>
+          <div style="position:relative;">
+            <input class="field-input" id="login-pass" type="password" placeholder="••••••••" style="padding-right:44px;">
+            <button id="login-pass-toggle" type="button" class="pw-toggle" aria-label="Show password" style="position:absolute; right:10px; top:50%; transform:translateY(-50%); background:transparent; border:none; color:#fff; font-size:1.1rem; padding:4px; cursor:pointer;"><i class="bi bi-eye"></i></button>
+          </div>
+        </div>
+      </div>
+      <button class="btn-login" onclick="doLogin()">Sign In</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════ MAIN APP ══════════════ -->
+<div id="app">
+  <!-- SIDEBAR -->
+  <nav class="sidebar" id="sidebar">
+    <div class="sb-logo">
+      <img src="../images/logo.png" alt="BISU Logo" class="sb-logo-icon">
+      <div>
+        <div class="sb-logo-text">OJT Tracker</div>
+        <div class="sb-logo-sub">BISU–Calape CTECH</div>
+      </div>
+    </div>
+    <div class="sb-nav" id="sb-nav"></div>
+    <div class="sb-footer">
+      <div class="sb-user" onclick="navigateTo('profile')" role="button" tabindex="0" onkeypress="if(event.key==='Enter') navigateTo('profile')">
+        <div class="sb-avatar" id="sb-avatar">--</div>
+        <div>
+          <div class="sb-user-name" id="sb-uname">Loading…</div>
+          <div class="sb-user-role" id="sb-urole"></div>
+        </div>
+      </div>
+      <button class="sb-logout" id="sb-logout-btn" onclick="doLogout()">🚪 Sign Out</button>
+    </div>
+  </nav>
+
+  <!-- MAIN CONTENT -->
+  <div class="main-area">
+    <div class="topbar">
+      <div class="topbar-title" id="topbar-title">Dashboard</div>
+      <div class="topbar-right">
+        <div class="topbar-notifications">
+          <button class="btn btn-outline btn-icon topbar-notif-btn" id="topbar-notif-btn" type="button" onclick="toggleNotificationsDropdown()" aria-expanded="false" aria-haspopup="true">
+            <i class="bi bi-bell"></i>
+            <span class="topbar-notif-count hidden" id="topbar-notif-count">0</span>
+          </button>
+          <div class="topbar-notif-dropdown hidden" id="topbar-notif-dropdown">
+            <div class="notif-panel-header">
+              <div>
+                <div class="notif-panel-title">Notifications</div>
+                <div class="notif-panel-subtitle">Stay updated with your internship activity</div>
+              </div>
+              <button class="btn btn-sm btn-outline" type="button" onclick="markAllAsRead()">Mark all read</button>
+            </div>
+            <div class="notif-list" id="topbar-notif-list">
+              <div class="notif-list-empty">Loading notifications…</div>
+            </div>
+            <div class="notif-panel-footer">
+              <button class="btn btn-sm btn-outline w-100 justify-content-center" type="button" onclick="viewAllNotifications()">View All Notifications →</button>
+            </div>
+          </div>
+        </div>
+        <div class="topbar-badge" id="topbar-badge">SY 2024–2025</div>
+      </div>
+    </div>
+
+    <div class="content" id="content"></div>
+  </div>
+</div>
+
+<!-- FACE SCAN MODAL -->
+<div class="face-modal-backdrop hidden" id="face-modal">
+  <div class="face-modal">
+    <button class="btn-close-modal" onclick="closeFaceModal()">✕</button>
+    <h3 id="face-modal-title">Face Recognition</h3>
+    <p id="face-modal-desc">Position your face within the frame</p>
+    <div class="camera-view">
+      <video class="camera-feed" id="camera-feed" autoplay playsinline muted></video>
+      <div class="scan-overlay">
+        <div class="scan-frame">
+          <div class="scan-corners-br"></div>
+          <div class="scan-line" id="scan-line"></div>
+        </div>
+      </div>
+    </div>
+    <div class="face-preview-row">
+      <div class="face-preview-card">
+        <div class="face-preview-label">Registered Student</div>
+        <img id="face-modal-ref-img" class="face-preview-img" src="" alt="Student reference photo">
+      </div>
+      <div class="face-preview-card">
+        <div class="face-preview-label">Current Scan</div>
+        <img id="face-modal-scan-img" class="face-preview-img" src="" alt="Current face scan">
+      </div>
+    </div>
+    <div class="scan-status scanning" id="scan-status">🔍 Scanning face…</div>
+    <button class="btn btn-outline" onclick="closeFaceModal()">Cancel</button>
+  </div>
+</div>
+
+<!-- GENERIC MODAL -->
+<div class="modal-overlay hidden" id="gen-modal">
+  <div class="modal-box">
+    <div class="modal-title" id="gen-modal-title"></div>
+    <div id="gen-modal-body"></div>
+    <div class="modal-actions">
+      <button class="btn btn-outline" onclick="closeGenModal()">Cancel</button>
+      <button class="btn btn-primary" id="gen-modal-save-button" onclick="handleGenModalSave()">Save</button>
+    </div>
+  </div>
+</div>
+
+<script src="login-inline-changes.js"></script>
+<script src="../js/app.js?v=70"></script>
+<script src="../js/roles/admin.js?v=25"></script>
+<script src="../js/roles/coordinator.js?v=32"></script>
+<script src="../js/roles/student.js?v=22"></script>
+<script src="../js/roles/student-helpers.js?v=15"></script>
+<script src="../js/roles/supervisor.js?v=27"></script>
+<script src="../js/roles/supervisor-helpers.js?v=21"></script>
+</body>
+</html>
+ 
