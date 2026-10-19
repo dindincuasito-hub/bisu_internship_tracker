@@ -1,6 +1,18 @@
 <?php
 require_once __DIR__ . '/db.php';
 
+function getSessionCookiePath(): string
+{
+    // The project can be installed at the web root (/php/login.php) or in a
+    // subdirectory (/bisu_internship_tracker/php/login.php).  Derive the
+    // cookie scope from the executing PHP path instead of assuming one layout.
+    $scriptName = str_replace('\\', '/', (string) ($_SERVER['SCRIPT_NAME'] ?? ''));
+    $projectPath = preg_replace('#/php(?:/.*)?$#', '', $scriptName) ?? '';
+    $projectPath = rtrim($projectPath, '/');
+
+    return $projectPath === '' ? '/' : $projectPath . '/';
+}
+
 function startSessionIfNeeded(): void
 {
     if (session_status() !== PHP_SESSION_NONE) {
@@ -11,7 +23,7 @@ function startSessionIfNeeded(): void
     ini_set('session.use_only_cookies', '1');
     session_set_cookie_params([
         'lifetime' => 0,
-        'path' => '/bisu_internship_tracker/',
+        'path' => getSessionCookiePath(),
         'secure' => !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off',
         'httponly' => true,
         'samesite' => 'Lax',
