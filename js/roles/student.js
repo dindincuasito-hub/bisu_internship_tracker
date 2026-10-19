@@ -332,6 +332,11 @@ PAGE_RENDERERS.student = {
     const program = account.program || 'Not set';
     const section = account.section || 'Not set';
     const academicYear = account.academic_year || 'Not set';
+    const assignmentValue = (value) => String(value || '').trim() || 'Not yet assigned.';
+    const companyName = assignmentValue(account.company_name);
+    const supervisorName = assignmentValue(account.supervisor_name);
+    const coordinatorName = assignmentValue(account.coordinator_name);
+    const companyLocation = assignmentValue(account.company_location);
     return `
       <div class="section-head"></div>
       <div class="two-col mb-24">
@@ -360,14 +365,13 @@ PAGE_RENDERERS.student = {
             <div class="profile-info-section">
               <div style="font-size:48px;text-align:center;margin-bottom:16px;background:var(--surface2);padding:20px;border-radius:12px;color:var(--blue)">🏢</div>
               <div style="text-align:center;margin-bottom:24px">
-                <div style="font-size:16px;font-weight:700;color:var(--text)">Tech Solutions Inc.</div>
+                <div style="font-size:16px;font-weight:700;color:var(--text)">${escapeHtml(companyName)}</div>
                 <div style="font-size:13px;color:var(--text3)">Host Company</div>
               </div>
               <div style="border-top:1px solid var(--border);padding-top:16px">
-                <div class="info-row"><span style="color:var(--text3);font-size:12px">👔 Supervisor</span><div style="font-weight:600">Maria Santos (Supervisor)</div></div>
-                <div class="info-row"><span style="color:var(--text3);font-size:12px">🎯 Coordinator</span><div style="font-weight:600">Ma. Elena Santos</div></div>
-                <div class="info-row"><span style="color:var(--text3);font-size:12px">📍 Location</span><div style="font-weight:600">TechHub Building, Cebu City</div></div>
-                <div class="info-row"><span style="color:var(--text3);font-size:12px">📞 Hotline</span><div style="font-weight:600">(032) 123-4567</div></div>
+                <div class="info-row"><span style="color:var(--text3);font-size:12px">👔 Supervisor</span><div style="font-weight:600">${escapeHtml(supervisorName)}</div></div>
+                <div class="info-row"><span style="color:var(--text3);font-size:12px">🎯 Coordinator</span><div style="font-weight:600">${escapeHtml(coordinatorName)}</div></div>
+                <div class="info-row"><span style="color:var(--text3);font-size:12px">📍 Location</span><div style="font-weight:600">${escapeHtml(companyLocation)}</div></div>
               </div>
             </div>
           </div>

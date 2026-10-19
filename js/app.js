@@ -2935,7 +2935,13 @@ function navigateTo(page) {
     if (currentRole === 'student' && page === 'tasks' && typeof loadStudentTasks === 'function') {
       loadStudentTasks().then(() => {
         if (currentRole === 'student' && currentPage === 'tasks') {
-          navigateTo('tasks');
+          // Refresh this page's task list once after the request completes.
+          // Calling navigateTo('tasks') here would start another task request,
+          // whose callback would navigate again, creating a render/request loop.
+          const tasksRenderer = PAGE_RENDERERS.student?.tasks;
+          if (typeof tasksRenderer === 'function') {
+            content.innerHTML = tasksRenderer();
+          }
           if (window.STUDENT_TASK_FOCUS_ID) {
             setTimeout(() => focusStudentTask(window.STUDENT_TASK_FOCUS_ID), 50);
           }

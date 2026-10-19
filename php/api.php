@@ -1801,15 +1801,19 @@ if ($resource === 'init') {
 // =====================================================
 if ($resource === 'profile') {
     $user = requireSession();
+    setPrivatePageHeaders();
     $userId = intval($user['id'] ?? 0);
 
     if ($method === 'GET') {
          $stmt = $pdo->prepare('SELECT u.id, u.name, u.email, u.username, u.contact, u.address, u.student_id,
                                       u.section, u.program_id, u.academic_year,
                            COALESCE(p.code, p.name, u.program) AS program,
-                           u.employee_id, u.company_id, COALESCE(c.name, u.company) AS company_name,
-                           c.contact_person AS company_contact_person, c.contact_email AS company_email,
-                                                     c.contact_phone AS company_phone, c.location AS company_location,
+                           u.employee_id,
+                           a.id AS assignment_id, a.internship_status AS assignment_status,
+                           c.name AS company_name,
+                           COALESCE(NULLIF(c.address, ""), NULLIF(c.location, "")) AS company_location,
+                           COALESCE(assignment_supervisor.name, company_supervisor.name) AS supervisor_name,
+                           COALESCE(assignment_coordinator.name, program_coordinator_user.name) AS coordinator_name,
                                                      (SELECT fr.face_image FROM face_registrations fr
                                                         WHERE fr.student_id = u.student_id
                                                             AND fr.registration_status = "Registered"
@@ -1818,7 +1822,37 @@ if ($resource === 'profile') {
                                                         ORDER BY fr.id DESC LIMIT 1) AS face_image
                                FROM users u
                                LEFT JOIN programs p ON p.id = u.program_id
-                       LEFT JOIN companies c ON c.id = u.company_id
+                               LEFT JOIN assignments a ON a.id = (
+                                   SELECT latest_assignment.id FROM assignments latest_assignment
+                                   WHERE latest_assignment.student_id = u.id
+                                   ORDER BY latest_assignment.updated_at DESC, latest_assignment.id DESC
+                                   LIMIT 1
+                               )
+                               LEFT JOIN companies c ON c.id = a.company_id
+                               LEFT JOIN users assignment_supervisor
+                                   ON assignment_supervisor.id = a.supervisor_id
+                                   AND assignment_supervisor.role = "supervisor"
+                                   AND assignment_supervisor.status = "Active"
+                                   AND assignment_supervisor.company_id = a.company_id
+                               LEFT JOIN users company_supervisor ON company_supervisor.id = (
+                                   SELECT company_sup.id FROM users company_sup
+                                   WHERE company_sup.role = "supervisor"
+                                       AND company_sup.status = "Active"
+                                       AND company_sup.company_id = a.company_id
+                                   ORDER BY company_sup.id ASC LIMIT 1
+                               )
+                               LEFT JOIN users assignment_coordinator
+                                   ON assignment_coordinator.id = a.coordinator_id
+                                   AND assignment_coordinator.role = "coordinator"
+                                   AND assignment_coordinator.status = "Active"
+                                   AND assignment_coordinator.program_id = u.program_id
+                               LEFT JOIN (
+                                   SELECT program_id, MIN(id) AS coordinator_id
+                                   FROM users
+                                   WHERE role = "coordinator" AND status = "Active" AND program_id IS NOT NULL
+                                   GROUP BY program_id
+                               ) program_coordinator ON program_coordinator.program_id = u.program_id
+                               LEFT JOIN users program_coordinator_user ON program_coordinator_user.id = program_coordinator.coordinator_id
                                WHERE u.id = ? AND u.role = ? AND u.status = "Active"
                                LIMIT 1');
         $stmt->execute([$userId, $user['role']]);

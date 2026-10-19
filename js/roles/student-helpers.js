@@ -3,7 +3,7 @@
 async function loadStudentProfile() {
   try {
     const apiBase = typeof API_BASE !== 'undefined' ? API_BASE : '../php/api.php';
-    const response = await fetch(`${apiBase}?resource=profile`);
+    const response = await fetch(`${apiBase}?resource=profile`, { cache: 'no-store' });
     const data = await response.json();
     if (!data.success || !data.profile || currentRole !== 'student' || currentPage !== 'profile') return;
 

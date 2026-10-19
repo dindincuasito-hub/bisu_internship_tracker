@@ -698,46 +698,6 @@ function initializeDatabase(PDO $pdo): void
         $stmt->execute(['Code Review Task', 'Ryan', 'May 5', '0/1', 'Not Started']);
     }
 
-    // Seed companies
-    $companies = $pdo->query('SELECT COUNT(*) AS count FROM companies')->fetch();
-    if ($companies && intval($companies['count']) === 0) {
-        $stmt = $pdo->prepare('INSERT INTO companies (name, location, contact_email, status) VALUES (?, ?, ?, ?)');
-        $stmt->execute(['Tech Solutions Inc.', 'Calape, Bohol', 'ojt@techsolutions.ph', 'Active']);
-        $stmt->execute(['Innovatech Global', 'Tagbilaran City', 'contact@innovatech.ph', 'Active']);
-        $stmt->execute(['Island Digital Hub', 'Panglao, Bohol', 'info@islanddigital.ph', 'Active']);
-        $stmt->execute(['Cebu Softworks', 'Cebu City', 'hr@cebusoftworks.ph', 'Active']);
-    }
-
-    // Seed relationships for the built-in accounts without changing existing assignments.
-    $assignments = $pdo->query('SELECT COUNT(*) AS count FROM assignments')->fetch();
-    if ($assignments && intval($assignments['count']) === 0) {
-        $studentStmt = $pdo->query("SELECT id, student_id FROM users WHERE role='student' AND status='Active' ORDER BY id ASC");
-        $studentRows = $studentStmt->fetchAll();
-        $supervisorId = $pdo->query("SELECT id FROM users WHERE role='supervisor' AND status='Active' ORDER BY id ASC LIMIT 1")->fetchColumn();
-        $coordinatorId = $pdo->query("SELECT id FROM users WHERE role='coordinator' AND status='Active' ORDER BY id ASC LIMIT 1")->fetchColumn();
-        $companyId = $pdo->query("SELECT id FROM companies WHERE name='Tech Solutions Inc.' LIMIT 1")->fetchColumn();
-        $schoolYearId = $pdo->query("SELECT id FROM school_years WHERE status='Active' ORDER BY id DESC LIMIT 1")->fetchColumn();
-        if ($supervisorId && $coordinatorId && $companyId) {
-            $assignmentStmt = $pdo->prepare(
-                'INSERT INTO assignments (student_id, company_id, supervisor_id, coordinator_id, school_year_id, program_code, internship_status, hours_completed, hours_required)
-                 SELECT ?, ?, ?, ?, ?, program, ?, ?, ? FROM users WHERE id = ?'
-            );
-            foreach ($studentRows as $index => $student) {
-                $assignmentStmt->execute([
-                    $student['id'],
-                    $companyId,
-                    $supervisorId,
-                    $coordinatorId,
-                    $schoolYearId ?: null,
-                    $index === 0 ? 'Ongoing' : 'Pending',
-                    $index === 0 ? 312 : 0,
-                    500,
-                    $student['id'],
-                ]);
-            }
-        }
-    }
-
     // Ensure username and role-specific columns exist for older installations
     try {
         $schemaColumns = [
