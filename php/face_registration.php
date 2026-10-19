@@ -58,8 +58,13 @@ function decodeFaceImage(string $faceImage): array
 
     $imageInfo = @getimagesizefromstring($decoded);
     $mime = $imageInfo['mime'] ?? '';
-    if (!in_array($mime, ['image/jpeg', 'image/png'], true) || ($imageInfo[0] ?? 0) < 160 || ($imageInfo[1] ?? 0) < 120) {
-        throw new RuntimeException('Only valid face images at least 160x120 pixels are allowed.');
+    $width = (int)($imageInfo[0] ?? 0);
+    $height = (int)($imageInfo[1] ?? 0);
+    if (!in_array($mime, ['image/jpeg', 'image/png'], true)
+        || $width < 192
+        || $height < 192
+        || abs($width - $height) > max($width, $height) * 0.05) {
+        throw new RuntimeException('A valid, square face crop of at least 192x192 pixels is required.');
     }
 
     return [$decoded, $mime === 'image/png' ? 'png' : 'jpg'];
@@ -114,8 +119,7 @@ $studentId = trim((string)($sessionUser['student_id'] ?? ''));
 
 if ($action === 'status') {
     try {
-        $pdo = getDbConnection();
-        ensureFaceRegistrationsTableExists($pdo);
+        $pdo = getDbConnection(false, false);
         if ($studentId === '') {
             throw new RuntimeException('Student ID is missing from the authenticated session.');
         }
@@ -126,7 +130,24 @@ if ($action === 'status') {
             echo json_encode(['success' => false, 'message' => 'Student not found']);
             exit;
         }
-        $registration = getFaceRegistration($pdo, (int)$user['id']);
+        $registrationStmt = $pdo->prepare(
+            "SELECT id,
+                  CASE WHEN LOWER(TRIM(registration_status)) = 'registered'
+                         OR LOWER(TRIM(status)) = 'registered'
+                     THEN 'Registered'
+                     ELSE COALESCE(NULLIF(registration_status, ''), status)
+                  END AS status,
+                    registered_by, remarks, registered_at, face_image, face_encoding
+             FROM face_registrations
+             WHERE user_id = ?
+             ORDER BY CASE WHEN LOWER(TRIM(registration_status)) = 'registered'
+                           OR LOWER(TRIM(status)) = 'registered'
+                       THEN 0 ELSE 1 END,
+                      id DESC
+             LIMIT 1"
+        );
+        $registrationStmt->execute([(int)$user['id']]);
+        $registration = $registrationStmt->fetch() ?: null;
         if (!$registration) {
             echo json_encode([
                 'success' => true,
@@ -136,15 +157,17 @@ if ($action === 'status') {
             ]);
             exit;
         }
-        $imageValid = storedFaceImageIsValid($registration['face_image']);
+        $registrationStatus = trim((string)($registration['status'] ?? 'Not Registered'));
+        $isRegistered = strcasecmp($registrationStatus, 'Registered') === 0;
+        $imageValid = !empty($registration['face_image']) && storedFaceImageIsValid($registration['face_image']);
         if (!$imageValid) {
-            $physicalPath = dirname(__DIR__) . '/' . $registration['face_image'];
-            error_log('Invalid registered face image: student_id=' . $user['student_id'] . ', database path=' . $registration['face_image'] . ', physical path=' . $physicalPath . ', file_exists=' . (is_file($physicalPath) ? 'TRUE' : 'FALSE'));
+            $physicalPath = dirname(__DIR__) . '/' . ($registration['face_image'] ?? '');
+            error_log('Invalid registered face image: student_id=' . $user['student_id'] . ', database path=' . ($registration['face_image'] ?? '') . ', physical path=' . $physicalPath . ', file_exists=' . (is_file($physicalPath) ? 'TRUE' : 'FALSE'));
         }
         echo json_encode([
             'success' => true,
-            'registered' => $imageValid,
-            'status' => $registration['status'],
+            'registered' => $isRegistered,
+            'status' => $registrationStatus,
             'registrationDate' => $registration['registered_at'],
             'registeredBy' => $registration['registered_by'],
             'remarks' => $registration['remarks'],
@@ -153,7 +176,7 @@ if ($action === 'status') {
             'imageValid' => $imageValid,
             'faceEncoding' => $registration['face_encoding'] ?? null,
             'history' => getFaceRegistrationHistory($pdo, (int)$user['id']),
-            'message' => $imageValid ? null : 'Registered face image could not be loaded. Please capture and save your face again.'
+            'message' => $isRegistered && !$imageValid ? 'Registered face image could not be loaded. Please contact your coordinator.' : null
         ]);
         exit;
     } catch (Throwable $e) {
@@ -192,16 +215,35 @@ if ($action === 'register') {
         exit;
     }
     try {
-        $pdo = getDbConnection();
-        ensureFaceRegistrationsTableExists($pdo);
-        $userStmt = $pdo->prepare('SELECT id, name, email, username, role, status, student_id FROM users WHERE id=? AND role="student" AND status="Active" LIMIT 1');
+        $pdo = getDbConnection(false, false);
+        $pdo->beginTransaction();
+        $userStmt = $pdo->prepare('SELECT id, name, email, username, role, status, student_id FROM users WHERE id=? AND role="student" AND status="Active" LIMIT 1 FOR UPDATE');
         $userStmt->execute([$userId]);
         $user = $userStmt->fetch();
         if (!$user) {
+            $pdo->rollBack();
+            http_response_code(404);
             echo json_encode(['success' => false, 'message' => 'Student not found']);
             exit;
         }
-        $existing = getFaceRegistration($pdo, (int)$user['id']);
+        $existingStmt = $pdo->prepare('SELECT id, registration_status, status, face_image FROM face_registrations WHERE user_id=? ORDER BY id DESC FOR UPDATE');
+        $existingStmt->execute([(int)$user['id']]);
+        $existingRows = $existingStmt->fetchAll();
+        foreach ($existingRows as $registrationRow) {
+            if (strcasecmp(trim((string)($registrationRow['registration_status'] ?? '')), 'Registered') === 0
+                || strcasecmp(trim((string)($registrationRow['status'] ?? '')), 'Registered') === 0) {
+                $pdo->rollBack();
+                http_response_code(409);
+                echo json_encode([
+                    'success' => false,
+                    'registered' => true,
+                    'registration_status' => 'Registered',
+                    'message' => 'Face registration is already complete and cannot be changed.'
+                ]);
+                exit;
+            }
+        }
+        $existing = $existingRows[0] ?? null;
         $oldStoredPath = $existing['face_image'] ?? null;
         [$decodedImage, $extension] = decodeFaceImage($faceImage);
         $uploadDir = dirname(__DIR__) . '/uploads/face_registrations/';
@@ -215,9 +257,8 @@ if ($action === 'register') {
         }
         $storedPath = 'uploads/face_registrations/' . $filename;
 
-        $pdo->beginTransaction();
         if ($existing) {
-            $stmt = $pdo->prepare('UPDATE face_registrations SET student_id=?, face_image=?, face_encoding=?, registration_status=?, status=?, registered_by=?, remarks=?, registered_at=?, updated_at=NOW() WHERE user_id=?');
+            $stmt = $pdo->prepare('UPDATE face_registrations SET student_id=?, face_image=?, face_encoding=?, registration_status=?, status=?, registered_by=?, remarks=?, registered_at=?, updated_at=NOW() WHERE id=? AND user_id=?');
             $stmt->execute([
                 $studentId ?: $user['student_id'],
                 $storedPath,
@@ -225,8 +266,9 @@ if ($action === 'register') {
                 'Registered',
                 'Registered',
                 $user['name'],
-                'Replaced face registration',
+                'Initial face registration',
                 date('Y-m-d H:i:s'),
+                $existing['id'],
                 $user['id']
             ]);
         } else {
@@ -242,7 +284,7 @@ if ($action === 'register') {
                 @unlink($oldAbsolutePath);
             }
         }
-        logActivity($pdo, (int)$user['id'], $existing ? 'Face Registration Update' : 'Face Registration', $existing ? 'Updated face registration.' : 'Registered face for attendance verification.');
+        logActivity($pdo, (int)$user['id'], 'Face Registration', 'Registered face for attendance verification.');
         echo json_encode([
             'success' => true,
             'message' => 'Face registration saved successfully.',
@@ -261,8 +303,14 @@ if ($action === 'register') {
             @unlink($absolutePath);
         }
         error_log('Face registration error: ' . $e->getMessage());
-        http_response_code(500);
-        echo json_encode(['success' => false, 'message' => 'Database save failed.']);
+        $databaseError = $e instanceof PDOException;
+        http_response_code($databaseError ? 503 : 422);
+        echo json_encode([
+            'success' => false,
+            'message' => $databaseError
+                ? 'The registration database is temporarily unavailable. Please try again shortly.'
+                : $e->getMessage()
+        ]);
         exit;
     }
 }

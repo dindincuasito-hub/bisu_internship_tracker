@@ -4,11 +4,142 @@ let SUPERVISOR_STUDENTS_USER_ID = null;
 let SUPERVISOR_LIVE_ATTENDANCE = [];
 let SUPERVISOR_ATTENDANCE_LOADED = false;
 let SUPERVISOR_ATTENDANCE_USER_ID = null;
+let SUPERVISOR_ATTENDANCE_DATE_FILTER = '';
+let SUPERVISOR_ATTENDANCE_STUDENT_FILTER = '';
 let SUPERVISOR_PROFILE = null;
 let SUPERVISOR_PROFILE_LOADED = false;
 let SUPERVISOR_PROFILE_USER_ID = null;
 let SUPERVISOR_LIVE_SUBMISSIONS = false;
 let SUPERVISOR_SUBMISSIONS_USER_ID = null;
+
+function getSupervisorAttendanceDateOptions() {
+  const dates = Array.from(new Set((Array.isArray(SUPERVISOR_LIVE_ATTENDANCE) ? SUPERVISOR_LIVE_ATTENDANCE : []).map(item => item.log_date || item.date || '').filter(Boolean))).sort((a, b) => String(b).localeCompare(String(a)));
+  return dates;
+}
+
+function getSupervisorAttendanceDurationSeconds(startValue, endValue) {
+  if (!startValue || !endValue) return 0;
+  const startMs = new Date(String(startValue).replace(' ', 'T')).getTime();
+  const endMs = new Date(String(endValue).replace(' ', 'T')).getTime();
+  if (Number.isNaN(startMs) || Number.isNaN(endMs)) return 0;
+  const seconds = Math.max(0, Math.round((endMs - startMs) / 1000));
+  return seconds;
+}
+
+function normalizeSupervisorAttendanceRows(rows) {
+  const grouped = new Map();
+
+  (Array.isArray(rows) ? rows : []).forEach(row => {
+    const key = `${row.student_id ?? row.studentId ?? row.student_name ?? 'unknown'}|${row.log_date ?? row.date ?? ''}`;
+    if (!grouped.has(key)) {
+      grouped.set(key, {
+        id: row.id || null,
+        student_id: row.student_id ?? row.studentId ?? null,
+        student_name: row.student_name || row.studentName || 'Unknown Student',
+        log_date: row.log_date || row.date || '',
+        date: row.log_date || row.date || '',
+        time_in: row.time_in || '',
+        time_out: row.time_out || '',
+        afternoon_time_in: row.afternoon_time_in || '',
+        afternoon_time_out: row.afternoon_time_out || '',
+        verification_status: row.verification_status || 'Pending',
+        time_in_location_status: row.time_in_location_status || 'Pending',
+        time_out_location_status: row.time_out_location_status || 'Pending',
+        afternoon_time_in_location_status: row.afternoon_time_in_location_status || 'Pending',
+        afternoon_time_out_location_status: row.afternoon_time_out_location_status || 'Pending',
+        time_out_verification_status: row.time_out_verification_status || row.verification_status || 'Pending',
+        afternoon_time_in_verification_status: row.afternoon_time_in_verification_status || 'Pending',
+        afternoon_time_out_verification_status: row.afternoon_time_out_verification_status || 'Pending',
+        status: row.status || 'Pending',
+        morning_seconds: 0,
+        afternoon_seconds: 0,
+        total_seconds: 0,
+      });
+    }
+
+    const target = grouped.get(key);
+    const fieldPairs = [
+      ['time_in', row.time_in],
+      ['time_out', row.time_out],
+      ['afternoon_time_in', row.afternoon_time_in],
+      ['afternoon_time_out', row.afternoon_time_out],
+      ['verification_status', row.verification_status],
+      ['time_out_verification_status', row.time_out_verification_status],
+      ['afternoon_time_in_verification_status', row.afternoon_time_in_verification_status],
+      ['afternoon_time_out_verification_status', row.afternoon_time_out_verification_status],
+      ['time_in_location_status', row.time_in_location_status],
+      ['time_out_location_status', row.time_out_location_status],
+      ['afternoon_time_in_location_status', row.afternoon_time_in_location_status],
+      ['afternoon_time_out_location_status', row.afternoon_time_out_location_status],
+      ['status', row.status],
+      ['student_name', row.student_name || row.studentName || 'Unknown Student'],
+    ];
+
+    fieldPairs.forEach(([field, value]) => {
+      if (value === null || value === undefined || value === '') return;
+      if (!target[field] || Number(row.id || 0) >= Number(target.id || 0)) {
+        target[field] = value;
+      }
+    });
+
+    if (!target.id || Number(row.id || 0) >= Number(target.id || 0)) {
+      target.id = row.id || target.id;
+    }
+  });
+
+  return Array.from(grouped.values()).map(item => {
+    const morningSeconds = getSupervisorAttendanceDurationSeconds(item.time_in, item.time_out);
+    const afternoonSeconds = getSupervisorAttendanceDurationSeconds(item.afternoon_time_in, item.afternoon_time_out);
+    const totalSeconds = morningSeconds + afternoonSeconds;
+    item.morning_seconds = morningSeconds;
+    item.afternoon_seconds = afternoonSeconds;
+    item.total_seconds = totalSeconds;
+    item.total_minutes = Math.round(totalSeconds / 60);
+    item.status = item.status || (totalSeconds > 0 ? 'Present' : 'Absent');
+    item.log_date = item.log_date || item.date || '';
+    return item;
+  });
+}
+
+function getSupervisorFilteredAttendance() {
+  const rows = Array.isArray(SUPERVISOR_LIVE_ATTENDANCE) ? SUPERVISOR_LIVE_ATTENDANCE : [];
+  return rows.filter(item => {
+    const date = item.log_date || item.date || '';
+    const name = item.student_name || '';
+    const matchesDate = !SUPERVISOR_ATTENDANCE_DATE_FILTER || date === SUPERVISOR_ATTENDANCE_DATE_FILTER;
+    const matchesStudent = !SUPERVISOR_ATTENDANCE_STUDENT_FILTER || name === SUPERVISOR_ATTENDANCE_STUDENT_FILTER;
+    return matchesDate && matchesStudent;
+  });
+}
+
+function formatSupervisorAttendanceHours(seconds) {
+  if (seconds === null || seconds === undefined || seconds === '' || Number(seconds) <= 0) {
+    return '—';
+  }
+  const totalHours = Number(seconds) / 3600;
+  return `${totalHours.toFixed(2)} hrs`;
+}
+
+function getSupervisorAttendanceSummaryRows() {
+  return getSupervisorFilteredAttendance();
+}
+
+function buildSupervisorAttendanceTableRow(item) {
+  return `<tr>
+    <td style="font-weight:600">${escapeHtml(item.student_name || 'Unknown Student')}</td>
+    <td style="font-family:'DM Mono',monospace;font-size:11px">${renderSupervisorAttendanceEvent(item,'time_in')}</td>
+    <td style="font-family:'DM Mono',monospace;font-size:11px">${renderSupervisorAttendanceEvent(item,'time_out')}</td>
+    <td style="font-family:'DM Mono',monospace;font-size:11px">${renderSupervisorAttendanceEvent(item,'afternoon_time_in')}</td>
+    <td style="font-family:'DM Mono',monospace;font-size:11px">${renderSupervisorAttendanceEvent(item,'afternoon_time_out')}</td>
+    <td>${formatSupervisorAttendanceHours(item.total_seconds || 0)}</td>
+    <td><span class="tag ${item.status === 'Present' ? 'tag-green' : item.status === 'Absent' ? 'tag-red' : 'tag-amber'}">${escapeHtml(item.status || 'Pending')}</span></td>
+  </tr>`;
+}
+
+function renderSupervisorAttendanceEvent(item, timeField) {
+  if (!item[timeField]) return '—';
+  return escapeHtml(formatAttendanceTime(item[timeField]));
+}
 
 function getSupervisorVisibleSubmissions() {
   return SUPERVISOR_LIVE_SUBMISSIONS ? SUBMISSIONS.filter(submission => submission.id) : [];
@@ -16,6 +147,10 @@ function getSupervisorVisibleSubmissions() {
 
 function getSupervisorVisibleTasks() {
   return SUPERVISOR_TASKS;
+}
+
+function getSupervisorPendingTaskCount() {
+  return SUPERVISOR_TASKS.filter(task => task.status !== 'Completed').length;
 }
 
 async function loadSupervisorTasks() {
@@ -30,7 +165,7 @@ async function loadSupervisorTasks() {
       task: task.title || '',
       description: task.description || '',
       studentId: Number(task.student_id) || 0,
-      assignee: task.student_name || '',
+      assignee: task.assignee_type === 'all' ? 'All Interns' : task.student_name || '',
       due: task.due_date || '',
       sub: `${Number(task.submission_count) || 0}/${Number(task.submission_count) || 0}`,
       status: ['Pending', 'Ongoing', 'Completed', 'Rejected / Needs Revision'].includes(task.status) ? task.status : 'Pending'
@@ -77,7 +212,11 @@ async function loadSupervisorAttendance() {
     const response = await fetch(`${apiBase}?resource=attendance`);
     const data = await response.json();
     if (!data.success || !Array.isArray(data.attendance)) throw new Error(data.message || 'Unable to load attendance.');
-    SUPERVISOR_LIVE_ATTENDANCE = data.attendance;
+    SUPERVISOR_LIVE_ATTENDANCE = normalizeSupervisorAttendanceRows(data.attendance);
+    if (!SUPERVISOR_ATTENDANCE_DATE_FILTER) {
+      const dates = getSupervisorAttendanceDateOptions();
+      SUPERVISOR_ATTENDANCE_DATE_FILTER = dates[0] || '';
+    }
     SUPERVISOR_ATTENDANCE_LOADED = true;
     SUPERVISOR_ATTENDANCE_USER_ID = currentUser?.id || null;
     if (currentRole === 'supervisor' && currentPage === 'attendance') navigateTo('attendance');
@@ -95,6 +234,8 @@ async function loadSupervisorSubmissions() {
     SUBMISSIONS.length = 0;
     data.submissions.forEach(item => SUBMISSIONS.push({
       id: item.id,
+      taskId: Number(item.task_id) || 0,
+      studentId: Number(item.student_id) || 0,
       student: item.student_name || '',
       name: item.file_name || 'Submitted file',
       task: item.task_title || '',
@@ -123,7 +264,7 @@ PAGE_RENDERERS.supervisor =  {
       <div class="stats-row cols4">
         <div class="stat-card blue"><div class="stat-icon">👥</div><div class="stat-val">${SUPERVISOR_LIVE_STUDENTS.length}</div><div class="stat-label">Total Interns</div></div>
         <div class="stat-card green"><div class="stat-icon">✅</div><div class="stat-val">${SUPERVISOR_LIVE_ATTENDANCE.filter(item => item.status === 'Present').length}</div><div class="stat-label">Present Today</div></div>
-        <div class="stat-card amber"><div class="stat-icon">📋</div><div class="stat-val">${SUPERVISOR_TASKS.filter(task => task.status !== 'Completed').length}</div><div class="stat-label">Open Tasks</div></div>
+        <div class="stat-card amber"><div class="stat-icon">📋</div><div class="stat-val">${getSupervisorPendingTaskCount()}</div><div class="stat-label">Pending Tasks</div></div>
         <div class="stat-card teal"><div class="stat-icon">📁</div><div class="stat-val">${getSupervisorVisibleSubmissions().length}</div><div class="stat-label">Submissions</div><div class="stat-trend amber">${getSupervisorVisibleSubmissions().filter(s => s.status === 'For Review').length} for review</div></div>
       </div>
       <div class="two-col">
@@ -135,7 +276,7 @@ PAGE_RENDERERS.supervisor =  {
               <div><div class="user-cell-name">${escapeHtml(s.student || '')}</div><div class="user-cell-sub">📄 ${escapeHtml(s.name || '')}</div></div>
               <div style="margin-left:auto;text-align:right">
                 <div style="font-size:11px;color:var(--text3)">${escapeHtml(s.date || '')}</div>
-                <button class="btn btn-outline btn-sm" style="margin-top:4px">Review</button>
+                <button type="button" class="btn btn-outline btn-sm" style="margin-top:4px" onclick="reviewSupervisorSubmission(${Number(s.id) || 0})">Review</button>
               </div>
             </div>`).join('') : '<div style="padding:24px 0;text-align:center;color:var(--text3)">No submissions because no students are assigned to your company yet.</div>'}
           </div>
@@ -238,32 +379,26 @@ PAGE_RENDERERS.supervisor =  {
     attendance: () => `
       <div class="breadcrumb">Supervisor Portal › Attendance View</div>
       <div class="section-head"><button class="btn btn-outline" onclick="exportAttendanceLog()">📥 Export Log</button></div>
-      <div class="stats-row cols4 mb-24">
-        <div class="stat-card green"><div class="stat-icon">✅</div><div class="stat-val">${SUPERVISOR_LIVE_ATTENDANCE.filter(item => item.status === 'Present').length}</div><div class="stat-label">Present Today</div></div>
-        <div class="stat-card red"><div class="stat-icon">❌</div><div class="stat-val">${SUPERVISOR_LIVE_ATTENDANCE.filter(item => item.status === 'Absent').length}</div><div class="stat-label">Absent</div></div>
-        <div class="stat-card amber"><div class="stat-icon">⚠️</div><div class="stat-val">${SUPERVISOR_LIVE_ATTENDANCE.filter(item => item.status === 'Late').length}</div><div class="stat-label">Late/Tardy</div></div>
-        <div class="stat-card blue"><div class="stat-icon">📷</div><div class="stat-val">${SUPERVISOR_LIVE_ATTENDANCE.length}</div><div class="stat-label">Face Log Entries</div></div>
-      </div>
       <div class="card mb-24">
         <div class="card-header"><div class="card-title">Attendance Filters</div></div>
         <div class="card-body">
           <div class="attendance-filter">
             <div style="display:flex;gap:8px;align-items:center;flex:1">
               <label style="font-size:12px;color:var(--text3);font-weight:600">Filter by Date:</label>
-              <input type="date" class="form-input" style="width:auto;font-size:12px" value="2026-04-29" onchange="filterAttendanceByDate(this.value)">
+              <input type="date" class="form-input" style="width:auto;font-size:12px" value="${escapeHtml(SUPERVISOR_ATTENDANCE_DATE_FILTER || '')}" onchange="filterAttendanceByDate(this.value)">
             </div>
             <div style="display:flex;gap:8px;align-items:center;flex:1">
               <label style="font-size:12px;color:var(--text3);font-weight:600">Filter by Student:</label>
-              <select class="form-select" style="font-size:12px" onchange="filterAttendanceByStudent(this.value)"><option value="">All Students</option>${SUPERVISOR_LIVE_STUDENTS.map(student => `<option>${escapeHtml(student.student_name || '')}</option>`).join('')}</select>
+              <select class="form-select" style="font-size:12px" onchange="filterAttendanceByStudent(this.value)"><option value="">All Students</option>${SUPERVISOR_LIVE_STUDENTS.map(student => `<option value="${escapeHtml(student.student_name || '')}" ${SUPERVISOR_ATTENDANCE_STUDENT_FILTER === (student.student_name || '') ? 'selected' : ''}>${escapeHtml(student.student_name || '')}</option>`).join('')}</select>
             </div>
           </div>
         </div>
       </div>
       <div class="card">
-        <div class="card-header"><div class="card-title">Face Recognition Attendance Log — April 29, 2026</div></div>
+        <div class="card-header"><div class="card-title">Face Recognition Attendance Log${SUPERVISOR_ATTENDANCE_DATE_FILTER ? ` — ${formatDisplayDate(SUPERVISOR_ATTENDANCE_DATE_FILTER)}` : ''}</div></div>
         <table>
-          <thead><tr><th>Student</th><th>Time In</th><th>Time Out</th><th>Duration</th><th>Face Confidence</th><th>Status</th></tr></thead>
-          <tbody>${SUPERVISOR_LIVE_ATTENDANCE.length ? SUPERVISOR_LIVE_ATTENDANCE.map(item => `<tr><td style="font-weight:600">${escapeHtml(item.student_name || '')}</td><td style="font-family:'DM Mono',monospace;font-size:12px">${escapeHtml(item.time_in || '—')}</td><td style="font-family:'DM Mono',monospace;font-size:12px">${escapeHtml(item.time_out || '—')}</td><td>${item.duration_minutes ? `${Math.round(Number(item.duration_minutes) / 60 * 10) / 10} hrs` : '—'}</td><td style="color:var(--text3);font-size:12px">—</td><td><span class="tag ${item.status === 'Present' ? 'tag-green' : item.status === 'Absent' ? 'tag-red' : 'tag-amber'}">${escapeHtml(item.status || 'Pending')}</span></td></tr>`).join('') : '<tr><td colspan="6" style="text-align:center;padding:24px;color:var(--text3)">No attendance records for students assigned to your company.</td></tr>'}</tbody>
+          <thead><tr><th>Student</th><th>Morning Time In</th><th>Morning Time Out</th><th>Afternoon Time In</th><th>Afternoon Time Out</th><th>Total Hours</th><th>Status</th></tr></thead>
+          <tbody>${getSupervisorAttendanceSummaryRows().length ? getSupervisorAttendanceSummaryRows().map(buildSupervisorAttendanceTableRow).join('') : '<tr><td colspan="7" style="text-align:center;padding:24px;color:var(--text3)">No attendance records for students assigned to your company.</td></tr>'}</tbody>
         </table>
       </div>`,
 

@@ -1,6 +1,12 @@
 <?php
 require_once __DIR__ . '/../../auth.php';
 header('Content-Type: text/html; charset=utf-8');
+try {
+    $user = requireAuth('coordinator');
+} catch (Throwable $e) {
+    header('Location: /bisu_internship_tracker/html/bisu_internship_tracker%20(1).html');
+    exit;
+}
 
 $htmlFile = __DIR__ . '/../../../html/bisu_internship_tracker (1).html';
 if (!file_exists($htmlFile)) {

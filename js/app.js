@@ -5,19 +5,23 @@ let currentPage = 'dashboard';
 let currentUser = { id: 0, name: 'Guest', username: '', email: '', role: 'student' };
 const APP_SCRIPT_URL = document.querySelector('script[src*="js/app.js"]')?.src || document.baseURI;
 const API_BASE = new URL('../php/api.php', APP_SCRIPT_URL).href;
+const CURRENT_PAGE_STORAGE_KEY = 'ojtTracker.currentPage';
 let cameraStream = null;
 let scanTimer = null;
 let faceRegCameraStream = null;
 let faceRegCanvas = null;
 let genModalSaveCallback = null;
 let lastAttendanceScan = null;
+let pendingAttendanceLocation = null;
+let pendingAttendanceEventType = null;
+let attendanceLocationRequestId = 0;
 let faceValidationLoop = null;
 let faceValidationCanvas = null;
 let embeddedFacePreviewStream = null;
 let faceTemplateCache = null;
 let faceValidationReadyFrames = 0;
 let lastFaceValidationRun = 0;
-let faceValidationFrameInterval = 40;
+let faceValidationFrameInterval = 250;
 let faceValidationState = {
   cameraConnected: false,
   faceDetected: false,
@@ -30,6 +34,7 @@ let faceValidationState = {
   multipleFaces: false,
   faceTooFar: false,
   faceTooClose: false,
+  faceBox: null,
   ready: false,
   message: 'Waiting for camera...'
 };
@@ -49,6 +54,8 @@ const FACE_REG_STATE = {
   successMessage: ''
 };
 let FACE_REGISTRATION_REGISTERED = false;
+let FACE_REGISTRATION_STATUS_VERIFIED = false;
+let FACE_REGISTRATION_LOCKED = false;
 const PAGE_RENDERERS = { common: {} };
 let DASHBOARD_STATS = {
   total_students: 0,
@@ -146,6 +153,7 @@ let notifications = [];
 let notificationsRefreshTimer = null;
 let notificationsDropdownOpen = false;
 let logoutInProgress = false;
+let loginInProgress = false;
 
 function normalizeNotification(record) {
   return {
@@ -770,6 +778,8 @@ function normalizeStudentTask(task) {
 async function loadStudentTasks() {
   if (currentRole !== 'student') return;
   try {
+    STUDENT_TASKS = [];
+    TASK_UNREAD_COUNTS.student = 0;
     const response = await fetch(`${API_BASE}?resource=tasks&_=${Date.now()}`, { cache: 'no-store' });
     const data = await response.json();
     if (!data.success || !Array.isArray(data.tasks)) throw new Error(data.message || 'Unable to load tasks.');
@@ -787,12 +797,7 @@ let SUPERVISOR_TASKS = [];
 
 let ATTENDANCE_LOG = [];
 
-let SUBMISSIONS = [
-  { student:'Juan dela Cruz', task:'Weekly Journal', name:'Week11_Journal.pdf', date:'Apr 22', status:'Approved', tag:'tag-green' },
-  { student:'Juan dela Cruz', task:'Database Schema Report', name:'DB_Schema_Report.docx', date:'Apr 20', status:'Approved', tag:'tag-green' },
-  { student:'Paolo Mendoza', task:'Meeting Minutes', name:'Meeting_Minutes_Apr15.pdf', date:'Apr 15', status:'For Review', tag:'tag-amber' },
-  { student:'Juan dela Cruz', task:'System Documentation', name:'SysDoc_Draft_v1.docx', date:'Apr 28', status:'For Review', tag:'tag-amber' },
-];
+let SUBMISSIONS = [];
 
 let pendingUploadFile = null;
 
@@ -846,7 +851,7 @@ const NAV = {
     { id:'dashboard', icon:'📊', label:'Dashboard' },
     { id:'facereg', icon:'<i class="bi bi-camera-fill"></i>', label:'Face Registration' },
     { id:'timein', icon:'📷', label:'Time In / Time Out' },
-    { id:'tasks', icon:'✅', label:'My Tasks', badge: 3 },
+    { id:'tasks', icon:'✅', label:'My Tasks', badge: 0 },
     { id:'submissions', icon:'📁', label:'File Submissions' },
     { id:'attendance', icon:'🗓️', label:'My Attendance' },
   ],
@@ -876,7 +881,7 @@ const NAV = {
   };
 
 const TASK_UNREAD_COUNTS = {
-  student: 3,
+  student: 0,
   supervisor: 2,
   coordinator: 0,
   admin: 0
@@ -1870,7 +1875,7 @@ function saveAccount() {
     : '';
   const academicYear = document.getElementById('gen-account-academic-year')?.value || '';
   const employeeId = document.getElementById(`gen-account-${role}-employee-id`)?.value.trim() || '';
-  const companySelect = document.getElementById('gen-account-company');
+  const companySelect = document.getElementById(role === 'coordinator' ? 'gen-account-coordinator-companies' : 'gen-account-supervisor-company');
   const companyIds = role === 'coordinator' || role === 'supervisor'
     ? Array.from(companySelect?.selectedOptions || []).map(option => option.value).filter(Boolean)
     : [];
@@ -2018,7 +2023,7 @@ function openAccountModal(editId = null, selectedRole = null) {
           ${PROGRAMS.map(programItem => `<option value="${escapeHtml(programItem.id)}" ${String(programItem.id) === String(user?.program_id || PROGRAMS.find(item => item.code === user?.program)?.id || '') ? 'selected' : ''}>${escapeHtml(programItem.code || programItem.name)}</option>`).join('')}
         </select>
         <label class="form-label mt-3">Company</label>
-        <select class="form-select" id="gen-account-company" multiple size="6">
+        <select class="form-select" id="gen-account-coordinator-companies" multiple size="6">
           <option value="">Select Company</option>
           ${ADMIN_COMPANIES.map(companyItem => {
             const selected = Array.isArray(user?.company_ids) ? user.company_ids.includes(Number(companyItem.id)) : (String(companyItem.id) === String(user?.company_id || ADMIN_COMPANIES.find(item => item.name === user?.company)?.id || ''));
@@ -2029,7 +2034,7 @@ function openAccountModal(editId = null, selectedRole = null) {
       <div class="mb-3" id="gen-account-supervisor-fields" style="display:${role === 'supervisor' ? 'block' : 'none'};">
         <div class="row g-3">
           <div class="col-md-6"><label class="form-label">Employee ID</label><input class="form-control" id="gen-account-supervisor-employee-id" type="text" value="${escapeHtml(user?.employee_id || '')}" placeholder="Enter employee ID"></div>
-          <div class="col-md-6"><label class="form-label">Company</label><select class="form-select" id="gen-account-company"><option value="">Select Company</option>${ADMIN_COMPANIES.map(companyItem => `<option value="${escapeHtml(companyItem.id)}" ${String(companyItem.id) === String(user?.company_id || ADMIN_COMPANIES.find(item => item.name === user?.company)?.id || '') ? 'selected' : ''}>${escapeHtml(companyItem.name)}</option>`).join('')}</select></div>
+          <div class="col-md-6"><label class="form-label">Company</label><select class="form-select" id="gen-account-supervisor-company"><option value="">Select Company</option>${ADMIN_COMPANIES.map(companyItem => `<option value="${escapeHtml(companyItem.id)}" ${String(companyItem.id) === String(user?.company_id || ADMIN_COMPANIES.find(item => item.name === user?.company)?.id || '') ? 'selected' : ''}>${escapeHtml(companyItem.name)}</option>`).join('')}</select></div>
         </div>
       </div>
     </div>
@@ -2254,74 +2259,160 @@ function selectRole(sel) {
   currentRole = VALID_ROLES.includes(sel.value) ? sel.value : 'student';
   currentRole = String(currentRole || '').toLowerCase();
 }
+
+function applyAuthenticatedUser(data) {
+  const role = String(data.role || '').toLowerCase();
+  const userId = Number(data.id);
+  if (!VALID_ROLES.includes(role) || !Number.isInteger(userId) || userId <= 0) {
+    return false;
+  }
+
+  currentRole = role;
+  const companyIds = Array.isArray(data.company_ids)
+    ? data.company_ids.filter(value => value !== null && value !== undefined && value !== '')
+    : (data.company_id ? [data.company_id] : []);
+  currentUser = {
+    id: userId,
+    name: data.name || 'User',
+    username: data.username || '',
+    email: data.email || '',
+    role,
+    program: data.program_name || data.program || '',
+    program_id: data.program_id || '',
+    student_id: data.student_id || '',
+    section: data.section || '',
+    academic_year: data.academic_year || '',
+    address: data.address || '',
+    company: data.company || '',
+    company_id: data.company_id || (companyIds[0] || ''),
+    company_ids: companyIds,
+    company_name: data.company_name || data.company || '',
+    employee_id: data.employee_id || ''
+  };
+  if (ROLES[role]) {
+    ROLES[role].name = currentUser.name;
+    ROLES[role].email = currentUser.email;
+  }
+  return true;
+}
+
+async function restoreAuthenticatedSession() {
+  const loginScreen = document.getElementById('login-screen');
+  const appContainer = document.getElementById('app');
+  try {
+    const response = await fetch(new URL('login.php', API_BASE), { cache: 'no-store' });
+    const data = await response.json();
+    if (!response.ok || !data.authenticated || !applyAuthenticatedUser(data.user || {})) {
+      sessionStorage.removeItem(CURRENT_PAGE_STORAGE_KEY);
+      if (loginScreen) loginScreen.style.display = 'flex';
+      if (appContainer) appContainer.style.display = 'none';
+      return;
+    }
+
+    const savedPage = sessionStorage.getItem(CURRENT_PAGE_STORAGE_KEY);
+    const allowedPages = (NAV[currentRole] || []).map(item => item.id);
+    currentPage = savedPage === 'profile' || allowedPages.includes(savedPage) ? savedPage : 'dashboard';
+    if (loginScreen) loginScreen.style.display = 'none';
+    if (appContainer) appContainer.style.display = 'block';
+    initApp();
+  } catch (error) {
+    console.warn('Unable to verify the current login session:', error);
+    if (loginScreen) loginScreen.style.display = 'flex';
+    if (appContainer) appContainer.style.display = 'none';
+  }
+}
+
+function showLoginFeedback(message) {
+  const feedback = document.getElementById('login-feedback');
+  if (!feedback) return;
+  feedback.textContent = message || '';
+  feedback.style.display = message ? 'block' : 'none';
+}
+
 async function doLogin() {
+  if (loginInProgress) return;
   // A successful new sign-in begins a new client session after a prior logout.
   logoutInProgress = false;
   const username = document.getElementById('login-username').value.trim();
-  const password = document.getElementById('login-pass').value.trim();
+  const password = document.getElementById('login-pass').value;
   const selectedRole = document.getElementById('login-role')?.value;
   currentRole = VALID_ROLES.includes(selectedRole) ? selectedRole : 'student';
 
   if (!username || !password) {
-    alert('Please enter username and password');
+    showLoginFeedback('Enter your username and password to continue.');
     return;
   }
 
-  // Show loading state so the button doesn't appear frozen
   const btn = document.querySelector('.btn-login');
-  const originalText = btn ? btn.textContent : '';
-  if (btn) { btn.textContent = 'Signing in…'; btn.disabled = true; }
+  const originalText = btn ? btn.textContent : 'Sign In';
+  const controller = new AbortController();
+  let timeoutId;
+  let timedOut = false;
+  let authenticated = false;
+  loginInProgress = true;
+  showLoginFeedback('');
+  if (btn) {
+    btn.textContent = 'Signing in…';
+    btn.disabled = true;
+  }
 
   try {
-    // 10-second timeout — prevents the browser from freezing if PHP/MySQL is slow
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 10000);
+    timeoutId = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, 30000);
     const response = await fetch(new URL('login.php', API_BASE), {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: `username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}&role=${encodeURIComponent(currentRole)}`,
-      signal: controller.signal
+      body: new URLSearchParams({ username, password, role: currentRole }).toString(),
+      signal: controller.signal,
+      cache: 'no-store'
     });
-    clearTimeout(timeoutId);
-    const data = await response.json();
+    const responseText = await response.text();
+    let data;
+    try {
+      data = responseText ? JSON.parse(responseText) : null;
+    } catch {
+      throw new Error(response.ok
+        ? 'The sign-in service returned an invalid response. Check the PHP error log.'
+        : `The sign-in service returned HTTP ${response.status}.`);
+    }
+    if (!data || typeof data !== 'object') {
+      throw new Error('The sign-in service returned an empty response. Please try again.');
+    }
+    if (!response.ok) {
+      throw new Error(data.message || `Sign-in failed with HTTP ${response.status}.`);
+    }
     if (!data.success) {
-      if (btn) { btn.textContent = originalText; btn.disabled = false; }
-      alert(data.message || 'Invalid credentials. Please check your username and password.');
+      showLoginFeedback(data.message || 'Invalid username or password.');
       return;
     }
-    currentRole = VALID_ROLES.includes(data.role) ? data.role : currentRole;
-    currentRole = String(currentRole || '').toLowerCase();
-    const normalizedCompanyIds = Array.isArray(data.company_ids)
-      ? data.company_ids.filter(value => value !== null && value !== undefined && value !== '')
-      : (data.company_id ? [data.company_id] : []);
-    currentUser = {
-      id: data.id || 0,
-      name: data.name || currentUser.name,
-      username: data.username || username,
-      email: data.email || currentUser.email,
-      role: currentRole,
-      program: data.program_name || data.program || '',
-      program_id: data.program_id || '',
-      student_id: data.student_id || '',
-      section: data.section || '',
-      academic_year: data.academic_year || '',
-      address: data.address || '',
-      company: data.company || '',
-      company_id: data.company_id || (normalizedCompanyIds[0] || ''),
-      company_ids: normalizedCompanyIds,
-      company_name: data.company_name || data.company || '',
-      employee_id: data.employee_id || ''
-    };
-    if (ROLES[currentRole]) {
-      ROLES[currentRole].name = currentUser.name;
-      ROLES[currentRole].email = currentUser.email;
+    if (!applyAuthenticatedUser({ ...data, username: data.username || username })) {
+      throw new Error('The server did not establish a valid account session. Please try again.');
     }
+    authenticated = true;
   } catch (error) {
-    console.warn('PHP login unavailable — running in demo mode:', error);
-    // Demo mode: continue even if PHP is unreachable or timed out
+    console.warn('Unable to complete login:', error);
+    const message = timedOut
+      ? 'Sign-in timed out while waiting for the server. Check MySQL and try again.'
+      : error.name === 'AbortError'
+        ? 'The sign-in request was interrupted. Please try again.'
+        : error instanceof TypeError
+          ? 'Could not reach the sign-in server. Check Apache and try again.'
+          : error.message || 'Unable to contact the sign-in service. Check the PHP/MySQL server and try again.';
+    showLoginFeedback(message);
+  } finally {
+    clearTimeout(timeoutId);
+    loginInProgress = false;
+    if (btn) {
+      btn.textContent = originalText;
+      btn.disabled = false;
+    }
   }
 
-  if (btn) { btn.textContent = originalText; btn.disabled = false; }
+  if (!authenticated) return;
+  currentPage = 'dashboard';
+  sessionStorage.setItem(CURRENT_PAGE_STORAGE_KEY, currentPage);
 
   if (currentRole === 'admin') {
     logAdminActivity('Login', `Logged in successfully as ${currentUser.name || 'admin'}.`);
@@ -2331,8 +2422,29 @@ async function doLogin() {
   initApp();
 }
 async function doLogout() {
-  if (logoutInProgress) return;
+  if (logoutInProgress) return false;
   logoutInProgress = true;
+
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
+    let response;
+    try {
+      response = await fetch('../php/logout.php', { method: 'POST', signal: controller.signal });
+    } finally {
+      clearTimeout(timeoutId);
+    }
+    const data = await response.json();
+    if (!response.ok || !data.success) {
+      throw new Error(data.message || 'The server did not confirm sign out.');
+    }
+  } catch (error) {
+    logoutInProgress = false;
+    console.warn('Unable to complete logout:', error);
+    alert('Unable to sign out. Please check your connection and try again.');
+    return false;
+  }
+
   if (notificationsRefreshTimer) {
     clearInterval(notificationsRefreshTimer);
     notificationsRefreshTimer = null;
@@ -2341,6 +2453,8 @@ async function doLogout() {
 
   currentPage = 'dashboard';
   currentRole = 'student';
+  sessionStorage.removeItem(CURRENT_PAGE_STORAGE_KEY);
+  closeSignOutConfirmation(true);
   const loginScreen = document.getElementById('login-screen');
   const appContainer = document.getElementById('app');
   if (loginScreen) loginScreen.style.display = 'flex';
@@ -2352,16 +2466,58 @@ async function doLogout() {
   if (loginUsername) loginUsername.value = '';
   const loginPass = document.getElementById('login-pass');
   if (loginPass) loginPass.value = '';
-
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 2500);
-    await fetch('../php/logout.php', { method: 'POST', signal: controller.signal });
-    clearTimeout(timeoutId);
-  } catch (error) {
-    console.warn('Logout background notification notice:', error);
-  }
+  return true;
 }
+
+let signOutConfirmationBusy = false;
+let signOutReturnFocus = null;
+
+function openSignOutConfirmation() {
+  if (logoutInProgress || signOutConfirmationBusy) return;
+  const modal = document.getElementById('signout-modal');
+  if (!modal) return;
+  signOutReturnFocus = document.activeElement;
+  modal.classList.remove('hidden');
+  modal.setAttribute('aria-hidden', 'false');
+  document.getElementById('signout-cancel')?.focus();
+}
+
+function closeSignOutConfirmation(force = false) {
+  if (signOutConfirmationBusy && !force) return;
+  const modal = document.getElementById('signout-modal');
+  if (!modal) return;
+  modal.classList.add('hidden');
+  modal.setAttribute('aria-hidden', 'true');
+  if (!force && signOutReturnFocus?.isConnected) signOutReturnFocus.focus();
+}
+
+async function confirmSignOut() {
+  if (signOutConfirmationBusy || logoutInProgress) return;
+  signOutConfirmationBusy = true;
+  const button = document.getElementById('signout-confirm');
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Signing Out...';
+  }
+
+  const success = await doLogout();
+  signOutConfirmationBusy = false;
+  if (button) {
+    button.disabled = false;
+    button.textContent = 'Sign Out';
+  }
+  if (success) closeSignOutConfirmation(true);
+}
+
+document.getElementById('signout-modal')?.addEventListener('click', event => {
+  if (event.target === event.currentTarget) closeSignOutConfirmation();
+});
+document.addEventListener('keydown', event => {
+  const modal = document.getElementById('signout-modal');
+  if (event.key === 'Escape' && modal && !modal.classList.contains('hidden')) {
+    closeSignOutConfirmation();
+  }
+});
 
 // ══ APP INIT ══
 function initApp() {
@@ -2385,7 +2541,7 @@ function initApp() {
     sbLogoutBtn._hasLogoutListener = true;
     sbLogoutBtn.addEventListener('click', (e) => {
       e.preventDefault();
-      doLogout();
+      openSignOutConfirmation();
     });
   }
 
@@ -2411,9 +2567,7 @@ function initApp() {
       return loadSupervisorTasks();
     }
   }).then(() => {
-    if (currentPage === 'dashboard') {
-      navigateTo('dashboard');
-    }
+    navigateTo(currentPage);
   });
   document.getElementById('content').addEventListener('click', handleContentAction);
 }
@@ -2492,23 +2646,25 @@ async function loadInitialData() {
         data.coordinators.forEach(c => COORDINATORS.push({ id: c.id, name: c.name, email: c.email, prog: c.program || '', program_id: c.program_id || '', students: 0, status: c.status }));
       }
 
-      const reportResponse = await fetch(`${API_BASE}?resource=admin_report`);
-      const reportData = await reportResponse.json();
-      if (reportData.success && Array.isArray(reportData.reports)) {
-        INTERNSHIPS = reportData.reports.map(assignment => ({
-          studentName: assignment.student_name || '',
-          studentId: assignment.student_no || '',
-          program: assignment.program || '',
-          company: assignment.company_name || '',
-          supervisor: assignment.supervisor_name || '',
-          coordinator: assignment.coordinator_name || '',
-          academicYear: assignment.year_label || 'N/A',
-          status: assignment.internship_status || 'Pending',
-          hoursCompleted: Number(assignment.hours_completed) || 0,
-          evaluationScore: Number(assignment.evaluation_score) || 0,
-          completionCleared: Boolean(Number(assignment.completion_cleared)),
-          requirements: {}
-        }));
+      if (currentRole === 'admin') {
+        const reportResponse = await fetch(`${API_BASE}?resource=admin_report`);
+        const reportData = await reportResponse.json();
+        if (reportData.success && Array.isArray(reportData.reports)) {
+          INTERNSHIPS = reportData.reports.map(assignment => ({
+            studentName: assignment.student_name || '',
+            studentId: assignment.student_no || '',
+            program: assignment.program || '',
+            company: assignment.company_name || '',
+            supervisor: assignment.supervisor_name || '',
+            coordinator: assignment.coordinator_name || '',
+            academicYear: assignment.year_label || 'N/A',
+            status: assignment.internship_status || 'Pending',
+            hoursCompleted: Number(assignment.hours_completed) || 0,
+            evaluationScore: Number(assignment.evaluation_score) || 0,
+            completionCleared: Boolean(Number(assignment.completion_cleared)),
+            requirements: {}
+          }));
+        }
       }
     }
   } catch (err) {
@@ -2519,21 +2675,50 @@ async function loadInitialData() {
 async function loadStudentData() {
   if (currentRole !== 'student' || !currentUser.id) return;
   try {
+    ATTENDANCE_LOG.length = 0;
+    SUBMISSIONS.length = 0;
+
     // Load student's own attendance from DB
     const attRes = await fetch(`${API_BASE}?resource=attendance`);
     const attData = await attRes.json();
-    if (attData.success && Array.isArray(attData.attendance) && attData.attendance.length) {
+    if (attData.success && Array.isArray(attData.attendance)) {
       // Replace local state with the student's actual database rows, including an empty result.
       ATTENDANCE_LOG.length = 0;
       attData.attendance.forEach(a => {
+        const totalMinutes = Number(a.total_minutes ?? a.duration_minutes) || 0;
         ATTENDANCE_LOG.push({
           id: a.id,
           date: new Date(`${a.log_date}T00:00:00`).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
           timeIn: a.time_in || '',
           timeOut: a.time_out || '',
-          hrs: a.duration_minutes !== null && a.duration_minutes !== undefined ? (Number(a.duration_minutes) / 60).toFixed(1) : '',
+          morningTimeIn: a.time_in || '',
+          morningTimeOut: a.time_out || '',
+          afternoonTimeIn: a.afternoon_time_in || '',
+          afternoonTimeOut: a.afternoon_time_out || '',
+          faceInImage: a.face_snapshot_in || '',
+          faceOutImage: a.face_snapshot_out || '',
+          afternoonFaceInImage: a.afternoon_face_snapshot_in || '',
+          afternoonFaceOutImage: a.afternoon_face_snapshot_out || '',
+          morningMinutes: a.morning_minutes,
+          afternoonMinutes: a.afternoon_minutes,
+          totalMinutes,
+          durationMinutes: totalMinutes,
+          hrs: (totalMinutes / 60).toFixed(2),
           verification: a.verification_status || 'Pending',
-          status: a.time_in ? 'Present' : 'Absent'
+          morningTimeInVerification: a.verification_status || 'Pending',
+          morningTimeOutVerification: a.time_out_verification_status || 'Pending',
+          afternoonTimeInVerification: a.afternoon_time_in_verification_status || 'Pending',
+          afternoonTimeOutVerification: a.afternoon_time_out_verification_status || 'Pending',
+          timeInLocationStatus: a.time_in_location_status || '',
+          timeOutLocationStatus: a.time_out_location_status || '',
+          afternoonTimeInLocationStatus: a.afternoon_time_in_location_status || '',
+          afternoonTimeOutLocationStatus: a.afternoon_time_out_location_status || '',
+          timeInDistance: a.time_in_distance_meters,
+          timeOutDistance: a.time_out_distance_meters,
+          afternoonTimeInDistance: a.afternoon_time_in_distance_meters,
+          afternoonTimeOutDistance: a.afternoon_time_out_distance_meters,
+          status: a.status || (a.time_in ? 'Present' : 'Absent'),
+          remarks: a.remarks || ''
         });
       });
     }
@@ -2541,7 +2726,7 @@ async function loadStudentData() {
     // Load student's own submissions from DB
     const subRes = await fetch(`${API_BASE}?resource=submissions`);
     const subData = await subRes.json();
-    if (subData.success && Array.isArray(subData.submissions) && subData.submissions.length) {
+    if (subData.success && Array.isArray(subData.submissions)) {
       SUBMISSIONS.length = 0;
       subData.submissions.forEach(s => {
         SUBMISSIONS.push({
@@ -2565,8 +2750,13 @@ async function refreshFaceRegistrationState() {
   if (currentRole !== 'student') return false;
   try {
     const result = await getFaceRegistrationEndpoint('status');
-    FACE_REGISTRATION_REGISTERED = result.success === true && result.registered === true && !!result.faceEncoding;
+    FACE_REGISTRATION_STATUS_VERIFIED = result.success === true;
+    FACE_REGISTRATION_LOCKED = FACE_REGISTRATION_STATUS_VERIFIED
+      && (result.registered === true || String(result.status || '').toLowerCase() === 'registered');
+    FACE_REGISTRATION_REGISTERED = FACE_REGISTRATION_LOCKED && result.registered === true && result.imageValid === true && !!result.faceEncoding;
   } catch (error) {
+    FACE_REGISTRATION_STATUS_VERIFIED = false;
+    FACE_REGISTRATION_LOCKED = false;
     FACE_REGISTRATION_REGISTERED = false;
   }
   return FACE_REGISTRATION_REGISTERED;
@@ -2663,6 +2853,7 @@ function navigateTo(page) {
     page = 'dashboard';
   }
   currentPage = page;
+  sessionStorage.setItem(CURRENT_PAGE_STORAGE_KEY, currentPage);
   if (page === 'tasks') {
     clearTaskBadge();
   }
@@ -2684,7 +2875,7 @@ function navigateTo(page) {
   // If renderer is missing for admin, attempt to load the admin script dynamically once and retry
   if (!renderer && roleKey === 'admin' && !navigateTo._adminLoaderTried) {
     navigateTo._adminLoaderTried = true;
-    const scriptSrc = '/js/roles/admin.js?v=16';
+    const scriptSrc = new URL('roles/admin.js?v=26', APP_SCRIPT_URL).href;
     try {
       const s = document.createElement('script');
       s.src = scriptSrc;
@@ -2711,7 +2902,7 @@ function navigateTo(page) {
     if (currentRole === 'admin' && page === 'companies' && typeof initAdminCompanySearch === 'function') {
       initAdminCompanySearch();
     }
-    if (typeof initAdminReportsPage === 'function') {
+    if (currentRole === 'admin' && page === 'reports' && typeof initAdminReportsPage === 'function') {
       initAdminReportsPage();
     }
     if (typeof initAdminLogsPage === 'function') {
@@ -2737,6 +2928,9 @@ function navigateTo(page) {
     }
     if (currentRole === 'supervisor' && page === 'profile' && typeof loadSupervisorProfile === 'function' && (!SUPERVISOR_PROFILE_LOADED || SUPERVISOR_PROFILE_USER_ID !== currentUser?.id)) {
       loadSupervisorProfile();
+    }
+    if (currentRole === 'admin' && page === 'profile' && typeof loadAdminProfile === 'function') {
+      loadAdminProfile();
     }
     if (currentRole === 'student' && page === 'tasks' && typeof loadStudentTasks === 'function') {
       loadStudentTasks().then(() => {
@@ -2936,80 +3130,104 @@ function clearTaskBadge() {
   buildNav();
 }
 
-async function recordAttendance(type, scanData, faceEncoding) {
-  const now = new Date();
-  const time = now.toLocaleTimeString('en-PH',{hour:'2-digit',minute:'2-digit',hour12:true});
-  const today = now.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
-  const todayEntry = ATTENDANCE_LOG[0] && ATTENDANCE_LOG[0].date === today ? ATTENDANCE_LOG[0] : null;
-
-  if (type === 'in') {
-    if (todayEntry && todayEntry.timeIn) {
-      alert('You have already timed in today. Please record your time out first.');
-      return false;
-    }
-
-    // Persist to DB before changing the local view.
-    try {
-      const params = new URLSearchParams({ action: 'time_in', face_snapshot: scanData || '', face_encoding: JSON.stringify(faceEncoding || []) });
-      const res = await fetch(`${API_BASE}?resource=attendance`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: params.toString()
-      });
-      const data = await res.json();
-      if (!data.success) {
-        alert(data.message || 'Time-in was not recorded.');
-        return false;
-      }
-      if (todayEntry) {
-        todayEntry.timeIn = time;
-        todayEntry.status = 'Present';
-        todayEntry.faceInImage = scanData;
-      } else {
-        ATTENDANCE_LOG.unshift({ date: today, timeIn: time, timeOut: '', hrs: '', status: 'Present', faceInImage: scanData });
-      }
-      addNotification(`Time in recorded at ${time}`, 'success');
-    } catch (err) {
-      console.warn('Time-in DB write error:', err);
-      alert('Unable to record time-in.');
-      return false;
-    }
-    return true;
+function getCurrentLocation() {
+  if (!navigator.geolocation) {
+    return Promise.reject(new Error('This browser does not support geolocation.'));
   }
 
-  if (!todayEntry || !todayEntry.timeIn) {
-    alert('Warning: Unable to record time out because there is no verified time in record for today. Please time in first with your own account.');
+  return new Promise((resolve, reject) => {
+    navigator.geolocation.getCurrentPosition(
+      (position) => resolve({
+        latitude: position.coords.latitude,
+        longitude: position.coords.longitude,
+        accuracy: position.coords.accuracy ?? null
+      }),
+      (error) => {
+        const messages = {
+          1: 'Location access is required to record your attendance. Please enable GPS/location permission and try again.',
+          2: 'Your location is unavailable. Turn on GPS/location services and try again.',
+          3: 'Getting your location timed out. Check GPS/location settings and try again.'
+        };
+        reject(new Error(messages[error.code] || 'Unable to access your location.'));
+      },
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+    );
+  });
+}
+
+async function recordAttendance(type, scanData, faceEncoding, location = pendingAttendanceLocation, eventType = pendingAttendanceEventType) {
+  const nextEvent = getNextStudentAttendanceEvent();
+  const selectedEvent = eventType || nextEvent?.action;
+  if (!nextEvent || selectedEvent !== nextEvent.action || nextEvent.type !== type) {
+    alert('Attendance events must be recorded in the displayed order. Refresh the page and try again.');
+    return false;
+  }
+  if (!location) {
+    alert('Location access is required to record your attendance. Please enable GPS/location permission and try again.');
     return false;
   }
 
-  if (todayEntry.timeOut) {
-    alert('Time out has already been recorded for today.');
-    return false;
-  }
+  const event = STUDENT_ATTENDANCE_EVENTS.find(item => item.action === selectedEvent);
+  if (!event) return false;
 
-  // Persist to DB before changing the local view; PHP verifies the registered descriptor.
   try {
-    const params = new URLSearchParams({ action: 'time_out', face_snapshot: scanData || '', face_encoding: JSON.stringify(faceEncoding || []) });
-    const res = await fetch(`${API_BASE}?resource=attendance`, {
+    const params = new URLSearchParams({
+      action: selectedEvent,
+      face_snapshot: scanData || '',
+      face_encoding: JSON.stringify(faceEncoding || []),
+      latitude: String(location.latitude),
+      longitude: String(location.longitude),
+      accuracy: String(location.accuracy ?? '')
+    });
+    const response = await fetch(`${API_BASE}?resource=attendance`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: params.toString()
     });
-    const data = await res.json();
-    if (!data.success) {
-      alert(data.message || 'Time-out was not recorded.');
+    const data = await response.json();
+    if (!response.ok || !data.success) {
+      alert(data.message || `${event.label} was not recorded.`);
       return false;
     }
-    todayEntry.timeOut = time;
-    todayEntry.faceOutImage = scanData;
-    todayEntry.status = 'Present';
-    addNotification(`Time out recorded at ${time}`, 'success');
-  } catch (err) {
-    console.warn('Time-out DB write error:', err);
-    alert('Unable to record time-out.');
+
+    const today = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    let todayEntry = getTodayAttendanceEntry();
+    if (!todayEntry) {
+      todayEntry = {
+        date: today,
+        timeIn: '',
+        timeOut: '',
+        morningTimeIn: '',
+        morningTimeOut: '',
+        afternoonTimeIn: '',
+        afternoonTimeOut: '',
+        totalMinutes: 0,
+        hrs: '0.00',
+        status: 'Present'
+      };
+      ATTENDANCE_LOG.unshift(todayEntry);
+    }
+
+    todayEntry[event.field] = data.time;
+    if (selectedEvent === 'morning_time_in') todayEntry.timeIn = data.time;
+    if (selectedEvent === 'morning_time_out') todayEntry.timeOut = data.time;
+    todayEntry[event.faceField] = scanData;
+    todayEntry[event.verificationField] = 'Verified';
+    todayEntry[event.locationField] = data.location_status || 'Verified';
+    todayEntry[event.distanceField] = data.distance_meters;
+    todayEntry.morningMinutes = data.morning_minutes;
+    todayEntry.afternoonMinutes = data.afternoon_minutes;
+    todayEntry.totalMinutes = Number(data.total_minutes) || 0;
+    todayEntry.durationMinutes = todayEntry.totalMinutes;
+    todayEntry.hrs = (todayEntry.totalMinutes / 60).toFixed(2);
+    todayEntry.status = data.status || todayEntry.status || 'Present';
+    addNotification(`${event.label} recorded at ${formatAttendanceTime(data.time)}`, 'success');
+    return true;
+  } catch (error) {
+    console.warn(`Attendance event ${selectedEvent} failed:`, error);
+    alert(error.message || `${event.label} could not be recorded.`);
     return false;
   }
-  return true;
 }
 
 function captureFaceSnapshot() {
@@ -3169,11 +3387,14 @@ async function loadFaceRegistrationStatus() {
 
   if (studentName) studentName.textContent = currentUser?.name || ROLES.student.name;
   if (studentId) studentId.textContent = currentUser?.nis || ROLES.student.nis || '—';
+  FACE_REGISTRATION_STATUS_VERIFIED = false;
+  FACE_REGISTRATION_LOCKED = false;
+  FACE_REGISTRATION_REGISTERED = false;
   if (faceIndicator) {
     faceIndicator.textContent = 'No Face Detected';
     faceIndicator.className = 'badge bg-secondary';
   }
-  if (openBtn) openBtn.disabled = false;
+  if (openBtn) openBtn.disabled = true;
   if (captureBtn) captureBtn.disabled = true;
   if (retakeBtn) retakeBtn.disabled = true;
   if (saveBtn) saveBtn.disabled = true;
@@ -3193,17 +3414,19 @@ async function loadFaceRegistrationStatus() {
     const result = await getFaceRegistrationEndpoint('status');
     if (!result.success) {
       if (statusText) statusText.textContent = 'Service unavailable';
-      if (openBtn) openBtn.disabled = false;
       return;
     }
 
     const faceImage = typeof result.faceImage === 'string' ? result.faceImage.trim() : '';
-    const registered = result.registered === true && result.status === 'Registered' && result.imageValid === true && !!faceImage;
-    const brokenRegisteredImage = result.status === 'Registered' && !!faceImage && result.imageValid === false;
-    FACE_REGISTRATION_REGISTERED = registered && !!result.faceEncoding;
+    const registered = result.registered === true || String(result.status || '').toLowerCase() === 'registered';
+    const imageAvailable = registered && result.imageValid === true && !!faceImage;
+    const brokenRegisteredImage = registered && result.imageValid === false;
+    FACE_REGISTRATION_STATUS_VERIFIED = true;
+    FACE_REGISTRATION_LOCKED = registered;
+    FACE_REGISTRATION_REGISTERED = registered && imageAvailable && !!result.faceEncoding;
     if (previewImg) {
-      previewImg.src = registered ? `${faceImage}${faceImage.includes('?') ? '&' : '?'}v=${Date.now()}` : (ROLES.student.photo || '');
-      previewImg.style.display = registered ? 'block' : '';
+      previewImg.src = imageAvailable ? `${faceImage}${faceImage.includes('?') ? '&' : '?'}v=${Date.now()}` : (ROLES.student.photo || '');
+      previewImg.style.display = imageAvailable ? 'block' : '';
       previewImg.onload = () => {
         previewImg.style.display = 'block';
       };
@@ -3213,35 +3436,36 @@ async function loadFaceRegistrationStatus() {
         showFaceRegAlert('Registered face image could not be loaded.', 'error');
       };
     }
-    if (registered && currentRole === 'student') {
+    if (imageAvailable && currentRole === 'student') {
       currentUser.face_image = faceImage;
       ROLES.student.photo = faceImage;
     }
     if (badge) {
-      badge.className = registered ? 'badge bg-success' : 'badge bg-secondary';
-      badge.textContent = registered ? 'Registered' : 'Not Registered';
+      badge.className = registered ? 'badge bg-success' : result.status === 'Pending' ? 'badge bg-warning text-dark' : 'badge bg-secondary';
+      badge.innerHTML = registered ? '<i class="bi bi-check-circle-fill me-1" aria-hidden="true"></i>Face Already Registered' : (result.status || 'Not Registered');
     }
-    if (statusText) statusText.textContent = registered ? 'Registered ✅' : (result.message || 'Not Registered');
+    if (statusText) statusText.textContent = registered
+      ? 'Your face has been successfully registered. Face registration can only be completed once. You cannot register or change your face again.'
+      : (result.message || result.status || 'Not Registered');
     if (brokenRegisteredImage) {
       showFaceRegAlert(result.message || 'Registered face image could not be loaded.', 'error');
     }
-    if (regDate) regDate.textContent = registered ? new Date(result.registrationDate).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) : '—';
-    if (regTime) regTime.textContent = registered ? new Date(result.registrationDate).toLocaleTimeString('en-PH', { hour: '2-digit', minute: '2-digit', hour12: true }) : '—';
-    if (capturedPreview && registered) {
+    if (regDate) regDate.textContent = registered && result.registrationDate ? new Date(result.registrationDate).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) : '—';
+    if (regTime) regTime.textContent = registered && result.registrationDate ? new Date(result.registrationDate).toLocaleTimeString('en-PH', { hour: '2-digit', minute: '2-digit', hour12: true }) : '—';
+    if (capturedPreview && imageAvailable) {
       capturedPreview.src = `${faceImage}${faceImage.includes('?') ? '&' : '?'}v=${Date.now()}`;
       capturedPreview.style.display = 'block';
     } else if (capturedPreview) {
       capturedPreview.src = '';
       capturedPreview.style.display = 'none';
     }
-    if (openBtn) openBtn.disabled = false;
-    if (captureBtn) captureBtn.disabled = true;
-    if (retakeBtn) retakeBtn.disabled = true;
-    if (saveBtn) saveBtn.disabled = true;
+    updateFaceRegistrationControls();
   } catch (error) {
+    FACE_REGISTRATION_STATUS_VERIFIED = false;
+    FACE_REGISTRATION_LOCKED = false;
     FACE_REGISTRATION_REGISTERED = false;
     if (statusText) statusText.textContent = 'Unable to load status';
-    if (openBtn) openBtn.disabled = false;
+    updateFaceRegistrationControls();
   }
 }
 
@@ -3256,17 +3480,18 @@ function updateFaceRegistrationControls() {
   const retakeBtn = document.getElementById('face-reg-retake-btn');
   const saveBtn = document.getElementById('face-reg-save-btn');
 
+  const registrationBlocked = !FACE_REGISTRATION_STATUS_VERIFIED || FACE_REGISTRATION_LOCKED;
   if (openBtn) {
-    openBtn.disabled = !!faceRegCameraStream;
+    openBtn.disabled = registrationBlocked || !!faceRegCameraStream;
   }
   if (captureBtn) {
-    captureBtn.disabled = !faceValidationState.ready || !faceRegCameraStream;
+    captureBtn.disabled = registrationBlocked || !faceValidationState.ready || !faceRegCameraStream;
   }
   if (retakeBtn) {
-    retakeBtn.disabled = !FACE_REG_STATE.faceCaptured;
+    retakeBtn.disabled = registrationBlocked || !FACE_REG_STATE.faceCaptured;
   }
   if (saveBtn) {
-    saveBtn.disabled = !FACE_REG_STATE.faceCaptured;
+    saveBtn.disabled = registrationBlocked || !FACE_REG_STATE.faceCaptured;
   }
 }
 
@@ -3301,7 +3526,81 @@ async function probeCameraDevice() {
   }
 }
 
+function canModifyFaceRegistration() {
+  if (FACE_REGISTRATION_LOCKED) {
+    showFaceRegAlert('Your face has been successfully registered. Face registration can only be completed once. You cannot register or change your face again.', 'warning');
+    return false;
+  }
+  if (!FACE_REGISTRATION_STATUS_VERIFIED) {
+    showFaceRegAlert('Checking your face registration status. Please try again in a moment.', 'warning');
+    return false;
+  }
+  return true;
+}
+
+async function captureCroppedRegistrationFace(video) {
+  await ensureRealFaceRecognition();
+  const detections = await faceapi.detectAllFaces(video, new faceapi.TinyFaceDetectorOptions({ inputSize: 416, scoreThreshold: 0.55 })).withFaceLandmarks();
+  if (detections.length !== 1) {
+    throw new Error(detections.length > 1 ? 'Only one face should be visible.' : 'No face detected. Position your face inside the circle.');
+  }
+  const box = detections[0].detection.box;
+  const faceBox = { x: box.x, y: box.y, width: box.width, height: box.height };
+  const guideDiameter = Math.min(video.videoWidth * 0.42, video.videoHeight * 0.72);
+  const centerX = video.videoWidth / 2;
+  const centerY = video.videoHeight / 2;
+  const faceCenterX = faceBox.x + faceBox.width / 2;
+  const faceCenterY = faceBox.y + faceBox.height / 2;
+  if (faceBox.width < guideDiameter * 0.52) throw new Error('Move closer to the camera.');
+  if (faceBox.width > guideDiameter * 0.92 || faceBox.height > guideDiameter * 0.92) throw new Error('Move slightly farther from the camera.');
+  if (Math.abs(faceCenterX - centerX) >= guideDiameter * 0.1 || Math.abs(faceCenterY - centerY) >= guideDiameter * 0.1) {
+    throw new Error('Center your face inside the circle.');
+  }
+  const facePadX = faceBox.width * 0.08;
+  const facePadY = faceBox.height * 0.08;
+  const guideCorners = [
+    [faceBox.x - facePadX, faceBox.y - facePadY],
+    [faceBox.x + faceBox.width + facePadX, faceBox.y - facePadY],
+    [faceBox.x - facePadX, faceBox.y + faceBox.height + facePadY],
+    [faceBox.x + faceBox.width + facePadX, faceBox.y + faceBox.height + facePadY]
+  ];
+  if (!guideCorners.every(([x, y]) => ((x - centerX) ** 2 + (y - centerY) ** 2) <= (guideDiameter * 0.47) ** 2)) {
+    throw new Error('Make sure your entire face is visible inside the circle.');
+  }
+  const landmarks = detections[0].landmarks.positions;
+  if (landmarks.length < 68) throw new Error('Make sure your entire face is visible.');
+  const quality = measureFaceImageQuality(video, faceBox);
+  if (!quality.lightingGood) throw new Error('Improve the lighting on your face before capturing.');
+  if (!quality.blurGood) throw new Error('Hold still; the image is blurry.');
+
+  const side = Math.max(faceBox.width, faceBox.height) * 1.22;
+  const sourceSize = Math.min(side, video.videoWidth, video.videoHeight);
+  if (sourceSize < 192) throw new Error('Move closer to the camera for a clearer face image.');
+  const cropCenterX = faceBox.x + faceBox.width / 2;
+  const cropCenterY = faceBox.y + faceBox.height / 2;
+  const left = Math.max(0, Math.min(video.videoWidth - sourceSize, cropCenterX - sourceSize / 2));
+  const top = Math.max(0, Math.min(video.videoHeight - sourceSize, cropCenterY - sourceSize / 2));
+  if (faceBox.x < left || faceBox.y < top || faceBox.x + faceBox.width > left + sourceSize || faceBox.y + faceBox.height > top + sourceSize) {
+    throw new Error('Make sure your entire face is visible inside the circle.');
+  }
+
+  const canvas = document.createElement('canvas');
+  canvas.width = 512;
+  canvas.height = 512;
+  const context = canvas.getContext('2d');
+  if (!context) throw new Error('Unable to crop the face image.');
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = 'high';
+  context.drawImage(video, left, top, sourceSize, sourceSize, 0, 0, canvas.width, canvas.height);
+  const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+  if (!imageData.data.some((value, index) => index % 4 === 3 && value > 0)) {
+    throw new Error('The captured face image is blank. Please try again.');
+  }
+  return canvas.toDataURL('image/jpeg', 0.92);
+}
+
 async function openFaceRegistrationCamera() {
+  if (!canModifyFaceRegistration()) return;
   if (faceRegCameraStream) {
     return;
   }
@@ -3334,6 +3633,14 @@ async function openFaceRegistrationCamera() {
   }).then((stream) => {
     faceRegCameraStream = stream;
     video.srcObject = stream;
+    const syncPreviewAspectRatio = () => {
+      if (video.videoWidth && video.videoHeight) {
+        const stage = video.closest('.face-capture-stage');
+        if (stage) stage.style.aspectRatio = `${video.videoWidth} / ${video.videoHeight}`;
+      }
+    };
+    video.addEventListener('loadedmetadata', syncPreviewAspectRatio, { once: true });
+    syncPreviewAspectRatio();
     video.play().catch(() => {});
     setFaceRegistrationState({ cameraActive: true, faceCaptured: false, capturedImage: '' });
     updateFaceValidationUI({ cameraConnected: true, message: 'Camera connected. Position your face in the frame.' });
@@ -3352,6 +3659,7 @@ async function openFaceRegistrationCamera() {
 }
 
 function captureFaceForRegistration() {
+  if (!canModifyFaceRegistration()) return;
   if (faceRegistrationSaving) {
     return;
   }
@@ -3396,7 +3704,8 @@ function captureFaceForRegistration() {
     return;
   }
 
-  captureFaceSnapshot().then((imageData) => {
+  const video = document.getElementById('cameraPreview');
+  captureCroppedRegistrationFace(video).then((imageData) => {
     const preview = document.getElementById('face-reg-captured-preview');
     if (preview) {
       preview.src = imageData;
@@ -3420,11 +3729,12 @@ function captureFaceForRegistration() {
     updateFaceRegistrationControls();
   }).catch((error) => {
     console.error('Face capture failed', error);
-    showFaceRegAlert('Face capture failed.', 'error');
+    showFaceRegAlert(error.message || 'Face capture failed.', 'error');
   });
 }
 
 function retakeFaceRegistration() {
+  if (!canModifyFaceRegistration()) return;
   const preview = document.getElementById('face-reg-captured-preview');
   if (preview) {
     preview.src = '';
@@ -3457,6 +3767,8 @@ function cancelFaceRegistration() {
 }
 
 async function saveFaceRegistration() {
+  if (faceRegistrationSaving) return;
+  if (!canModifyFaceRegistration()) return;
   if (!FACE_REG_STATE.faceCaptured || !FACE_REG_STATE.capturedImage) {
     showFaceRegAlert('Capture your face before saving the registration.', 'warning');
     return;
@@ -3466,6 +3778,7 @@ async function saveFaceRegistration() {
     return;
   }
   const saveBtn = document.getElementById('face-reg-save-btn');
+  faceRegistrationSaving = true;
   if (saveBtn) {
     saveBtn.disabled = true;
     saveBtn.textContent = 'Saving…';
@@ -3473,6 +3786,7 @@ async function saveFaceRegistration() {
   try {
     const response = await registerFace(FACE_REG_STATE.capturedImage);
     if (!response || response.success !== true) {
+      showFaceRegAlert(response?.message || 'Unable to save your face registration. Please try again.', 'error');
       return;
     }
     const savedFaceImage = typeof response.faceImage === 'string' ? response.faceImage.trim() : '';
@@ -3482,14 +3796,13 @@ async function saveFaceRegistration() {
       registeredImage.style.display = 'block';
     }
     setFaceRegistrationState({ faceCaptured: false, capturedImage: '' });
-    const preview = document.getElementById('face-reg-captured-preview');
-    if (preview) {
-      preview.style.display = 'block';
-    }
+    await loadFaceRegistrationStatus();
   } finally {
+    faceRegistrationSaving = false;
     if (saveBtn) {
       saveBtn.textContent = 'Save Registration';
     }
+    updateFaceRegistrationControls();
   }
 }
 
@@ -3513,6 +3826,7 @@ function cancelFaceRegistrationFlow() {
 }
 
 async function registerFace(scanData, replaceExisting = false) {
+  if (currentRole === 'student' && !canModifyFaceRegistration()) return;
   const actionBtn = document.getElementById('face-reg-action-btn');
   if (actionBtn) {
     actionBtn.disabled = true;
@@ -3905,9 +4219,9 @@ function updateFaceValidationUI(state) {
   showFaceRegAlert(faceValidationState.message, faceValidationState.ready ? 'success' : 'danger');
   const faceIndicator = document.getElementById('face-detection-indicator');
   if (faceIndicator) {
-    const detected = faceValidationState.faceDetected && !faceValidationState.multipleFaces;
-    faceIndicator.textContent = detected ? 'Face Detected' : 'No Face Detected';
-    faceIndicator.className = `badge ${detected ? 'bg-success' : 'bg-secondary'}`;
+    const ready = faceValidationState.ready === true;
+    faceIndicator.textContent = ready ? 'Face detected. Ready to capture.' : faceValidationState.faceDetected && !faceValidationState.multipleFaces ? 'Face detected · checking quality' : 'No Face Detected';
+    faceIndicator.className = `badge ${ready ? 'bg-success' : faceValidationState.faceDetected && !faceValidationState.multipleFaces ? 'bg-warning text-dark' : 'bg-secondary'}`;
   }
   const lightingQuality = document.getElementById('face-quality-lighting');
   const centeredQuality = document.getElementById('face-quality-centered');
@@ -3949,7 +4263,50 @@ function stopFaceValidationLoop() {
     faceValidationLoop = null;
   }
 }
-function evaluateFaceFrame(video) {
+function measureFaceImageQuality(video, faceBox) {
+  const cropSize = Math.max(faceBox.width, faceBox.height) * 1.2;
+  const centerX = faceBox.x + faceBox.width / 2;
+  const centerY = faceBox.y + faceBox.height / 2;
+  const left = Math.max(0, Math.min(video.videoWidth - cropSize, centerX - cropSize / 2));
+  const top = Math.max(0, Math.min(video.videoHeight - cropSize, centerY - cropSize / 2));
+  const sourceSize = Math.min(cropSize, video.videoWidth - left, video.videoHeight - top);
+  const canvas = document.createElement('canvas');
+  canvas.width = 128;
+  canvas.height = 128;
+  const context = canvas.getContext('2d', { willReadFrequently: true });
+  context.drawImage(video, left, top, sourceSize, sourceSize, 0, 0, canvas.width, canvas.height);
+  const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+  const gray = new Float32Array(canvas.width * canvas.height);
+  let brightness = 0;
+  let clippedPixels = 0;
+  for (let index = 0; index < gray.length; index += 1) {
+    const pixelIndex = index * 4;
+    gray[index] = pixels[pixelIndex] * 0.299 + pixels[pixelIndex + 1] * 0.587 + pixels[pixelIndex + 2] * 0.114;
+    brightness += gray[index];
+    if (gray[index] < 18 || gray[index] > 245) clippedPixels += 1;
+  }
+  let laplacianTotal = 0;
+  let laplacianSquaredTotal = 0;
+  let samples = 0;
+  for (let y = 1; y < canvas.height - 1; y += 1) {
+    for (let x = 1; x < canvas.width - 1; x += 1) {
+      const index = y * canvas.width + x;
+      const laplacian = gray[index - canvas.width] + gray[index - 1] - 4 * gray[index] + gray[index + 1] + gray[index + canvas.width];
+      laplacianTotal += laplacian;
+      laplacianSquaredTotal += laplacian * laplacian;
+      samples += 1;
+    }
+  }
+  const averageBrightness = brightness / gray.length;
+  const laplacianMean = laplacianTotal / samples;
+  const sharpness = laplacianSquaredTotal / samples - laplacianMean * laplacianMean;
+  return {
+    lightingGood: averageBrightness >= 45 && averageBrightness <= 220 && clippedPixels / gray.length < 0.35,
+    blurGood: sharpness >= 18
+  };
+}
+
+async function evaluateFaceFrame(video) {
   const now = performance.now();
   if (now - lastFaceValidationRun < faceValidationFrameInterval) {
     return faceValidationState;
@@ -3958,67 +4315,75 @@ function evaluateFaceFrame(video) {
   if (!video || !video.videoWidth || !video.videoHeight) {
     return { cameraConnected: false, faceDetected: false, faceCentered: false, lightingGood: false, blurGood: false, cameraQuality: false, eyesVisible: false, ready: false, message: 'Camera disconnected.' };
   }
-  if (!faceValidationCanvas) {
-    faceValidationCanvas = document.createElement('canvas');
+  try {
+    await ensureRealFaceRecognition();
+    const detections = await faceapi.detectAllFaces(video, new faceapi.TinyFaceDetectorOptions({ inputSize: 416, scoreThreshold: 0.55 })).withFaceLandmarks();
+    const multipleFaces = detections.length > 1;
+    const faceDetected = detections.length === 1;
+    if (!faceDetected) {
+      faceValidationReadyFrames = 0;
+      return {
+        cameraConnected: true, faceDetected: false, faceCentered: false, lightingGood: false, blurGood: false,
+        cameraQuality: false, eyesVisible: false, insideGuide: false, multipleFaces, faceTooFar: false,
+        faceTooClose: false, faceBox: null, ready: false,
+        message: multipleFaces ? 'Only one face should be visible.' : 'No face detected. Position your face inside the circle.'
+      };
+    }
+
+    const box = detections[0].detection.box;
+    const faceBox = { x: box.x, y: box.y, width: box.width, height: box.height };
+    const guideDiameter = Math.min(video.videoWidth * 0.42, video.videoHeight * 0.72);
+    const centerX = video.videoWidth / 2;
+    const centerY = video.videoHeight / 2;
+    const faceCenterX = faceBox.x + faceBox.width / 2;
+    const faceCenterY = faceBox.y + faceBox.height / 2;
+    const faceTooFar = faceBox.width < guideDiameter * 0.52;
+    const faceTooClose = faceBox.width > guideDiameter * 0.92 || faceBox.height > guideDiameter * 0.92;
+    const faceCentered = Math.abs(faceCenterX - centerX) < guideDiameter * 0.1 && Math.abs(faceCenterY - centerY) < guideDiameter * 0.1;
+    const padX = faceBox.width * 0.08;
+    const padY = faceBox.height * 0.08;
+    const corners = [
+      [faceBox.x - padX, faceBox.y - padY],
+      [faceBox.x + faceBox.width + padX, faceBox.y - padY],
+      [faceBox.x - padX, faceBox.y + faceBox.height + padY],
+      [faceBox.x + faceBox.width + padX, faceBox.y + faceBox.height + padY]
+    ];
+    const insideGuide = corners.every(([x, y]) => ((x - centerX) ** 2 + (y - centerY) ** 2) <= (guideDiameter * 0.47) ** 2);
+    const landmarks = detections[0].landmarks.positions;
+    const eyesVisible = landmarks.length >= 68 && landmarks.slice(36, 48).every(point => point.x >= faceBox.x && point.x <= faceBox.x + faceBox.width && point.y >= faceBox.y && point.y <= faceBox.y + faceBox.height);
+    const quality = measureFaceImageQuality(video, faceBox);
+    const lightingGood = quality.lightingGood;
+    const blurGood = quality.blurGood;
+    const cameraQuality = lightingGood && blurGood;
+    let message = 'Hold still.';
+    let ready = false;
+    if (faceTooFar) message = 'Move closer to the camera.';
+    else if (faceTooClose) message = 'Move slightly farther from the camera.';
+    else if (!faceCentered) message = 'Center your face inside the circle.';
+    else if (!insideGuide) message = 'Make sure your entire face is visible inside the circle.';
+    else if (!eyesVisible) message = 'Make sure your entire face is visible.';
+    else if (!lightingGood) message = 'Improve the lighting on your face.';
+    else if (!blurGood) message = 'Hold still; the image is blurry.';
+    else {
+      ready = true;
+      message = 'Face detected. Ready to capture.';
+    }
+    faceValidationReadyFrames = ready ? faceValidationReadyFrames + 1 : 0;
+    const stableReady = faceValidationReadyFrames >= 2;
+    return {
+      cameraConnected: true, faceDetected, faceCentered, lightingGood, blurGood, cameraQuality, eyesVisible,
+      insideGuide, multipleFaces, faceTooFar, faceTooClose, faceBox, ready: stableReady,
+      message: stableReady ? 'Face detected. Ready to capture.' : message
+    };
+  } catch (error) {
+    faceValidationReadyFrames = 0;
+    return {
+      cameraConnected: true, faceDetected: false, faceCentered: false, lightingGood: false, blurGood: false,
+      cameraQuality: false, eyesVisible: false, insideGuide: false, multipleFaces: false, faceTooFar: false,
+      faceTooClose: false, faceBox: null, ready: false,
+      message: 'Face detection is unavailable. Check your connection and try again.'
+    };
   }
-  faceValidationCanvas.width = 240;
-  faceValidationCanvas.height = 180;
-  const context = faceValidationCanvas.getContext('2d');
-  context.drawImage(video, 0, 0, faceValidationCanvas.width, faceValidationCanvas.height);
-  applyFaceEnhancement(faceValidationCanvas);
-  const vector = buildFaceFeatureVector(faceValidationCanvas);
-  const faceDetected = vector.skinRatio > 0.018;
-  const faceTooFar = vector.skinRatio < 0.01;
-  const faceTooClose = vector.skinRatio > 0.11;
-  const faceCentered = vector.centroidX > 0.24 && vector.centroidX < 0.76 && vector.centroidY > 0.22 && vector.centroidY < 0.78;
-  const insideGuide = faceCentered;
-  const multipleFaces = vector.skinRatio > 0.16;
-  const lightingGood = vector.centerBrightnessAvg > 45 && vector.centerBrightnessAvg < 235;
-  const blurGood = vector.edgeAvg > 10;
-  const cameraQuality = faceDetected && blurGood && lightingGood;
-  const eyesVisible = faceDetected && vector.centerRatio > 0.04;
-  let message = 'Hold still.';
-  let ready = false;
-  if (!faceDetected) {
-    message = 'No face detected.';
-  } else if (multipleFaces) {
-    message = 'Multiple faces detected.';
-  } else if (faceTooFar) {
-    message = 'Face too far.';
-  } else if (faceTooClose) {
-    message = 'Face too close.';
-  } else if (!faceCentered) {
-    message = 'Face not centered.';
-  } else if (!insideGuide) {
-    message = 'Face outside guide frame.';
-  } else if (!lightingGood) {
-    message = 'Poor lighting.';
-  } else if (!blurGood) {
-    message = 'Face is blurry.';
-  } else if (!eyesVisible) {
-    message = 'Eyes are not visible.';
-  } else {
-    ready = true;
-    message = 'Ready to capture.';
-  }
-  const nextReadyFrames = ready ? faceValidationReadyFrames + 1 : 0;
-  faceValidationReadyFrames = nextReadyFrames;
-  const stableReady = faceValidationReadyFrames >= 2;
-  return {
-    cameraConnected: true,
-    faceDetected,
-    faceCentered,
-    lightingGood,
-    blurGood,
-    cameraQuality,
-    eyesVisible,
-    insideGuide,
-    multipleFaces,
-    faceTooFar,
-    faceTooClose,
-    ready: stableReady,
-    message: stableReady ? 'Ready to capture.' : message
-  };
 }
 function startFaceValidationLoop(video, type = 'register') {
   if (!video) {
@@ -4026,9 +4391,13 @@ function startFaceValidationLoop(video, type = 'register') {
   }
   stopFaceValidationLoop();
   faceValidationReadyFrames = 0;
-  const tick = () => {
-    const state = evaluateFaceFrame(video);
+  let running = false;
+  const tick = async () => {
+    if (running) return;
+    running = true;
+    const state = await evaluateFaceFrame(video);
     updateFaceValidationUI(state);
+    running = false;
     faceValidationLoop = requestAnimationFrame(tick);
   };
   faceValidationLoop = requestAnimationFrame(tick);
@@ -4071,11 +4440,25 @@ function setFaceModalStatus(message, type = 'info') {
   status.textContent = String(message || '').split('\n').join(' ');
   status.className = `scan-status ${type === 'error' ? 'error' : type === 'success' ? 'success' : 'scanning'}`;
 }
-function openFaceModal(type) {
+async function openFaceModal(type, attendanceEventType = null) {
+  if (currentRole === 'student' && type === 'register' && !canModifyFaceRegistration()) {
+    return;
+  }
   if (currentRole === 'student' && type !== 'register' && !FACE_REGISTRATION_REGISTERED) {
     alert('Please register your face first before recording attendance.');
     navigateTo('facereg');
     return;
+  }
+  if (currentRole === 'student' && type !== 'register') {
+    const nextEvent = getNextStudentAttendanceEvent();
+    const selectedEvent = attendanceEventType || nextEvent?.action;
+    if (!nextEvent || selectedEvent !== nextEvent.action || nextEvent.type !== type) {
+      alert('Attendance events must be recorded in the displayed order.');
+      return;
+    }
+    pendingAttendanceEventType = selectedEvent;
+  } else {
+    pendingAttendanceEventType = null;
   }
   const modal = document.getElementById('face-modal');
   const refImg = document.getElementById('face-modal-ref-img');
@@ -4083,8 +4466,11 @@ function openFaceModal(type) {
   const title = document.getElementById('face-modal-title');
   const desc = document.getElementById('face-modal-desc');
   const status = document.getElementById('scan-status');
+  const selectedEventLabel = STUDENT_ATTENDANCE_EVENTS.find(event => event.action === pendingAttendanceEventType)?.label;
   if (title) {
-    title.textContent = type === 'in' ? '📷 Time In — Face Recognition' : (type === 'out' ? '🚪 Time Out — Face Recognition' : '📸 Face Registration');
+    title.textContent = type === 'register'
+      ? '📸 Face Registration'
+      : `${type === 'in' ? '📷' : '🚪'} ${selectedEventLabel || (type === 'in' ? 'Time In' : 'Time Out')} — Face Recognition`;
   }
   if (desc) {
     desc.textContent = type === 'register' ? 'Capture your face to register it for future attendance verification.' : 'Please position your face within the frame. Keep still for accurate recognition.';
@@ -4106,9 +4492,50 @@ function openFaceModal(type) {
     faceRegistrationPending = false;
   }
   modal.classList.remove('hidden');
-  startCamera(type);
+  const requestId = ++attendanceLocationRequestId;
+  pendingAttendanceLocation = null;
+  if (type === 'register') {
+    startCamera(type);
+    return;
+  }
+
+  setFaceModalStatus('Getting your location…', 'info');
+  try {
+    const location = await getCurrentLocation();
+    if (requestId !== attendanceLocationRequestId) return;
+    setFaceModalStatus('Checking OJT location…', 'info');
+    const response = await fetch(`${API_BASE}?resource=attendance`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        action: 'validate_location',
+        latitude: String(location.latitude),
+        longitude: String(location.longitude),
+        accuracy: String(location.accuracy ?? '')
+      }).toString()
+    });
+    const result = await response.json();
+    if (!response.ok || !result.success) {
+      throw new Error(result.message || 'Unable to verify your OJT location.');
+    }
+    if (requestId !== attendanceLocationRequestId) return;
+    pendingAttendanceLocation = {
+      ...location,
+      distanceMeters: Number(result.distance_meters),
+      allowedRadiusMeters: Number(result.allowed_radius_meters)
+    };
+    setFaceModalStatus(`Location verified — ${Math.round(pendingAttendanceLocation.distanceMeters)} meters away. Starting face scan…`, 'success');
+    await startCamera(type);
+  } catch (error) {
+    if (requestId !== attendanceLocationRequestId) return;
+    pendingAttendanceLocation = null;
+    setFaceModalStatus(error.message || 'Unable to verify your location. Attendance was not recorded.', 'error');
+  }
 }
 function closeFaceModal() {
+  attendanceLocationRequestId++;
+  pendingAttendanceLocation = null;
+  pendingAttendanceEventType = null;
   const modal = document.getElementById('face-modal');
   if (modal) {
     modal.classList.add('hidden');
@@ -4151,7 +4578,10 @@ async function startCamera(type) {
       await video.play().catch(() => {});
     }
     updateFaceValidationUI({ cameraConnected: true, message: 'Camera connected. Please position your face.' });
-    setFaceModalStatus('🔍 Scanning face…', 'info');
+    const locationStatus = type !== 'register' && pendingAttendanceLocation
+      ? `Location verified — ${Math.round(pendingAttendanceLocation.distanceMeters)} meters away. Scanning face…`
+      : '🔍 Scanning face…';
+    setFaceModalStatus(locationStatus, 'info');
     startFaceValidationLoop(video, type);
     if (type === 'register') {
       setFaceModalStatus('Camera ready. Capture your face, then save the registration.', 'info');
@@ -4189,8 +4619,8 @@ async function startCamera(type) {
       try {
         const descriptor = await getRealFaceDescriptor(readyFrame);
         setFaceModalStatus('✅ Face captured. Verifying…', 'success');
-        const attendanceSaved = await recordAttendance(type, readyFrame, descriptor);
-        logFaceAttempt(type, 'success', 'Face verified', { attendanceType: type });
+        const attendanceSaved = await recordAttendance(type, readyFrame, descriptor, pendingAttendanceLocation, pendingAttendanceEventType);
+        logFaceAttempt(type, attendanceSaved ? 'success' : 'failed', attendanceSaved ? 'Face verified' : 'Attendance event was not recorded', { attendanceType: pendingAttendanceEventType || type });
         if (attendanceSaved) {
           setTimeout(() => {
             closeFaceModal();
@@ -4272,10 +4702,18 @@ function closeGenModal() {
   document.getElementById('gen-modal').classList.add('hidden');
 }
 
+function formatAttendanceTime(value) {
+  const timestamp = String(value || '').trim();
+  if (!timestamp || timestamp === '—') return timestamp || '—';
+
+  const match = timestamp.match(/(?:^|[T\s])(\d{1,2}:\d{2})(?::\d{2}(?:\.\d+)?)?(?:\s*(AM|PM))?/i);
+  return match ? `${match[1]}${match[2] ? ` ${match[2].toUpperCase()}` : ''}` : timestamp;
+}
+
 // live clock
 function updateClock() {
   const el = document.getElementById('live-time');
-  if(el) el.textContent = new Date().toLocaleTimeString('en-PH',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:true});
+  if(el) el.textContent = new Date().toLocaleTimeString('en-PH',{hour:'2-digit',minute:'2-digit',hour12:true});
 }
 setInterval(updateClock, 1000);
 
@@ -4440,10 +4878,13 @@ function openNewCompanyModal() {
   const body = `
     <div class="form-row"><label class="form-label">Company Name <span style="color:#d14343">*</span></label><input class="form-input" id="gen-company-name" type="text" placeholder="Enter company name"></div>
     <div class="form-row"><label class="form-label">Address <span style="color:#d14343">*</span></label><input class="form-input" id="gen-company-address" type="text" placeholder="Enter company address"></div>
+    <div class="form-row"><label class="form-label">Latitude</label><input class="form-input" id="gen-company-lat" type="number" step="any" placeholder="Company latitude"></div>
+    <div class="form-row"><label class="form-label">Longitude</label><input class="form-input" id="gen-company-lng" type="number" step="any" placeholder="Company longitude"></div>
+    <div class="form-row"><label class="form-label">Allowed Radius (meters)</label><input class="form-input" id="gen-company-radius" type="number" min="1" max="10000" step="1" value="100"></div>
     <div class="form-row"><label class="form-label">Contact Person <span style="color:#d14343">*</span></label><input class="form-input" id="gen-company-contact" type="text" placeholder="Enter contact person"></div>
     <div class="form-row"><label class="form-label">Contact Number <span style="color:#d14343">*</span></label><input class="form-input" id="gen-company-phone" type="text" placeholder="Enter contact number"></div>
     <div class="form-row"><label class="form-label">Email</label><input class="form-input" id="gen-company-email" type="email" placeholder="Enter email address"></div>
-    <div class="form-row"><label class="form-label">Status</label><select class="form-select" id="gen-company-status"><option value="Active">Active</option><option value="Pending">Pending</option><option value="Inactive">Inactive</option></select></div>
+    <div class="form-row"><label class="form-label">Status</label><select class="form-select" id="gen-company-status"><option value="Active">Active</option><option value="Inactive">Inactive</option></select></div>
   `;
   openGenModal('Add Company', body, async () => saveCompany('add'), 'Save Company');
 }
@@ -4454,10 +4895,13 @@ function editCompany(companyOrIndex) {
   const body = `
     <div class="form-row"><label class="form-label">Company Name <span style="color:#d14343">*</span></label><input class="form-input" id="gen-company-name" type="text" value="${escapeHtml(company.name || '')}"></div>
     <div class="form-row"><label class="form-label">Address <span style="color:#d14343">*</span></label><input class="form-input" id="gen-company-address" type="text" value="${escapeHtml(company.address || company.location || '')}"></div>
+    <div class="form-row"><label class="form-label">Latitude</label><input class="form-input" id="gen-company-lat" type="number" step="any" value="${escapeHtml(company.latitude ?? '')}"></div>
+    <div class="form-row"><label class="form-label">Longitude</label><input class="form-input" id="gen-company-lng" type="number" step="any" value="${escapeHtml(company.longitude ?? '')}"></div>
+    <div class="form-row"><label class="form-label">Allowed Radius (meters)</label><input class="form-input" id="gen-company-radius" type="number" min="1" max="10000" step="1" value="${escapeHtml(company.allowed_radius_meters ?? 100)}"></div>
     <div class="form-row"><label class="form-label">Contact Person <span style="color:#d14343">*</span></label><input class="form-input" id="gen-company-contact" type="text" value="${escapeHtml(company.contact_person || company.contact || '')}"></div>
     <div class="form-row"><label class="form-label">Contact Number <span style="color:#d14343">*</span></label><input class="form-input" id="gen-company-phone" type="text" value="${escapeHtml(company.contact_phone || company.phone || '')}"></div>
     <div class="form-row"><label class="form-label">Email</label><input class="form-input" id="gen-company-email" type="email" value="${escapeHtml(company.contact_email || company.email || '')}"></div>
-    <div class="form-row"><label class="form-label">Status</label><select class="form-select" id="gen-company-status"><option value="Active" ${company.status==='Active'?'selected':''}>Active</option><option value="Pending" ${company.status==='Pending'?'selected':''}>Pending</option><option value="Inactive" ${company.status==='Inactive'?'selected':''}>Inactive</option></select></div>
+    <div class="form-row"><label class="form-label">Status</label><select class="form-select" id="gen-company-status"><option value="Active" ${company.status==='Active'?'selected':''}>Active</option><option value="Inactive" ${company.status==='Inactive'?'selected':''}>Inactive</option></select></div>
   `;
   openGenModal('Edit Company', body, async () => saveCompany('edit', index), 'Save Company');
 }
@@ -4465,10 +4909,18 @@ function editCompany(companyOrIndex) {
 async function saveCompany(mode, index = null) {
   const name = document.getElementById('gen-company-name')?.value.trim();
   const address = document.getElementById('gen-company-address')?.value.trim();
+  const latitude = document.getElementById('gen-company-lat')?.value.trim();
+  const longitude = document.getElementById('gen-company-lng')?.value.trim();
+  const allowedRadius = document.getElementById('gen-company-radius')?.value.trim() || '100';
   const contact = document.getElementById('gen-company-contact')?.value.trim();
   const phone = document.getElementById('gen-company-phone')?.value.trim();
   const email = document.getElementById('gen-company-email')?.value.trim();
   const status = document.getElementById('gen-company-status')?.value || 'Active';
+
+  if (!['Active', 'Inactive'].includes(status)) {
+    alert('Company status must be Active or Inactive.');
+    return false;
+  }
 
   if (!name || !address || !contact || !phone) {
     alert('Please complete all required fields.');
@@ -4479,6 +4931,9 @@ async function saveCompany(mode, index = null) {
     name,
     address,
     location: address,
+    latitude: latitude || '',
+    longitude: longitude || '',
+    allowed_radius_meters: allowedRadius,
     contact_person: contact,
     contact_phone: phone,
     contact_email: email,
@@ -4673,6 +5128,15 @@ function viewSecurityLogs() {
   </div>`;
   openGenModal('Security Logs', body, null, 'Close');
 }
+
+document.addEventListener('DOMContentLoaded', restoreAuthenticatedSession);
+window.addEventListener('pageshow', event => {
+  if (event.persisted) {
+    const appContainer = document.getElementById('app');
+    if (appContainer) appContainer.style.display = 'none';
+    restoreAuthenticatedSession();
+  }
+});
 
 function testSystem() {
   addNotification('System test initiated...', 'info');

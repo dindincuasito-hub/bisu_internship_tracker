@@ -18,7 +18,6 @@ function getReportsFilters() {
 
 function getFilteredReportRows() {
   const filters = getReportsFilters();
-
   return INTERNSHIPS
     .map((internship) => {
       const student = ADMIN_STUDENTS.find((item) => item.name === internship.studentName) || {};
@@ -104,7 +103,7 @@ function initAdminCompanySearch() {
 
 function getAdminCompanyRowsMarkup(companies, startIndex) {
   return companies.length ? companies.map((company, rowIndex) => {
-    const statusClass = company.status === 'Active' ? 'tag-green' : company.status === 'Pending' ? 'tag-amber' : 'tag-gray';
+    const statusClass = company.status === 'Active' ? 'tag-green' : 'tag-gray';
     return `<tr>
       <td>${startIndex + rowIndex + 1}</td>
       <td style="font-weight:600">${escapeHtml(company.name || '—')}</td>
@@ -170,6 +169,89 @@ function printAdminInternshipReport() {
   if (typeof mountGeneratedInternshipReport !== 'function') return;
   mountGeneratedInternshipReport(getAdminGeneratedReportRows(), getAdminReportPrintOptions());
   window.print();
+}
+
+async function loadAdminProfile() {
+  try {
+    const response = await fetch(`${API_BASE}?resource=profile`, { cache: 'no-store' });
+    const data = await response.json();
+    if (!response.ok || !data.success || !data.profile) {
+      throw new Error(data.message || 'Unable to load your profile.');
+    }
+    if (currentRole !== 'admin' || currentPage !== 'profile') return;
+
+    currentUser = { ...currentUser, ...data.profile };
+    document.getElementById('admin-profile-name').value = data.profile.name || '';
+    document.getElementById('admin-profile-email').value = data.profile.email || '';
+    document.getElementById('admin-profile-contact').value = data.profile.contact || '';
+  } catch (error) {
+    setAdminProfileMessage(error.message || 'Unable to load your profile.', true);
+  }
+}
+
+function setAdminProfileMessage(message, isError = false, target = 'admin-profile-message') {
+  const element = document.getElementById(target);
+  if (!element) return;
+  element.textContent = message;
+  element.style.color = isError ? 'var(--danger, #c0392b)' : 'var(--success, #237a45)';
+}
+
+async function saveAdminProfile() {
+  const name = document.getElementById('admin-profile-name')?.value.trim() || '';
+  const email = document.getElementById('admin-profile-email')?.value.trim() || '';
+  const contact = currentUser.contact || '';
+  if (!name || !email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    setAdminProfileMessage('Enter your name and a valid email address.', true);
+    return;
+  }
+
+  try {
+    const response = await fetch(`${API_BASE}?resource=profile`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, email, contact })
+    });
+    const data = await response.json();
+    if (!response.ok || !data.success) throw new Error(data.message || 'Unable to save your profile.');
+    currentUser = { ...currentUser, name, email, contact };
+    setAdminProfileMessage(data.message || 'Profile updated successfully.');
+  } catch (error) {
+    setAdminProfileMessage(error.message || 'Unable to save your profile.', true);
+  }
+}
+
+async function saveAdminPassword() {
+  const currentPassword = document.getElementById('admin-current-password')?.value || '';
+  const newPassword = document.getElementById('admin-new-password')?.value || '';
+  const confirmPassword = document.getElementById('admin-confirm-password')?.value || '';
+  if (!currentPassword || !newPassword || !confirmPassword) {
+    setAdminProfileMessage('Complete all password fields.', true, 'admin-password-message');
+    return;
+  }
+  if (newPassword.length < 8) {
+    setAdminProfileMessage('New password must be at least 8 characters long.', true, 'admin-password-message');
+    return;
+  }
+  if (newPassword !== confirmPassword) {
+    setAdminProfileMessage('New password and confirmation do not match.', true, 'admin-password-message');
+    return;
+  }
+
+  try {
+    const response = await fetch(`${API_BASE}?resource=profile`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ current_password: currentPassword, new_password: newPassword, confirm_password: confirmPassword })
+    });
+    const data = await response.json();
+    if (!response.ok || !data.success) throw new Error(data.message || 'Unable to change your password.');
+    document.getElementById('admin-current-password').value = '';
+    document.getElementById('admin-new-password').value = '';
+    document.getElementById('admin-confirm-password').value = '';
+    setAdminProfileMessage(data.message || 'Password updated successfully.', false, 'admin-password-message');
+  } catch (error) {
+    setAdminProfileMessage(error.message || 'Unable to change your password.', true, 'admin-password-message');
+  }
 }
 
 function initAdminLogsPage() {
@@ -505,18 +587,21 @@ function changeAdminLogsPage(delta) {
         <div class="card">
           <div class="card-header"><div class="card-title">Account Information</div></div>
           <div class="card-body">
-            <div class="form-row"><label class="form-label">Name</label><input class="form-input" type="text" value="Admin User"></div>
-            <div class="form-row"><label class="form-label">Email</label><input class="form-input" type="email" value="admin@bisu.edu.ph"></div>
+            <div class="form-row"><label class="form-label" for="admin-profile-name">Name</label><input class="form-input" id="admin-profile-name" type="text" maxlength="120" value="${escapeHtml(currentUser.name || '')}" required></div>
+            <div class="form-row"><label class="form-label" for="admin-profile-email">Email</label><input class="form-input" id="admin-profile-email" type="email" maxlength="160" value="${escapeHtml(currentUser.email || '')}" required></div>
             <div class="form-row"><label class="form-label">Role</label><input class="form-input" type="text" value="Administrator" disabled></div>
-            <button class="btn btn-primary">Update Profile</button>
+            <button class="btn btn-primary" type="button" onclick="saveAdminProfile()">Update Profile</button>
+            <div id="admin-profile-message" role="status" aria-live="polite" style="margin-top:12px"></div>
           </div>
         </div>
         <div class="card">
           <div class="card-header"><div class="card-title">Security</div></div>
           <div class="card-body">
-            <div class="form-row"><label class="form-label">Change Password</label><input class="form-input" type="password" placeholder="New password"></div>
-            <div class="form-row"><label class="form-label">Confirm Password</label><input class="form-input" type="password" placeholder="Confirm password"></div>
-            <button class="btn btn-primary">Save Password</button>
+            <div class="form-row"><label class="form-label" for="admin-current-password">Current Password</label><input class="form-input" id="admin-current-password" type="password" autocomplete="current-password"></div>
+            <div class="form-row"><label class="form-label" for="admin-new-password">New Password</label><input class="form-input" id="admin-new-password" type="password" autocomplete="new-password" minlength="8"></div>
+            <div class="form-row"><label class="form-label" for="admin-confirm-password">Confirm Password</label><input class="form-input" id="admin-confirm-password" type="password" autocomplete="new-password" minlength="8"></div>
+            <button class="btn btn-primary" type="button" onclick="saveAdminPassword()">Save Password</button>
+            <div id="admin-password-message" role="status" aria-live="polite" style="margin-top:12px"></div>
           </div>
         </div>
       </div>` ,

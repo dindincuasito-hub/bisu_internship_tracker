@@ -1,8 +1,32 @@
 <?php
 require_once __DIR__ . '/db.php';
 
-if (session_status() === PHP_SESSION_NONE) {
+function startSessionIfNeeded(): void
+{
+    if (session_status() !== PHP_SESSION_NONE) {
+        return;
+    }
+
+    ini_set('session.use_strict_mode', '1');
+    ini_set('session.use_only_cookies', '1');
+    session_set_cookie_params([
+        'lifetime' => 0,
+        'path' => '/bisu_internship_tracker/',
+        'secure' => !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off',
+        'httponly' => true,
+        'samesite' => 'Lax',
+    ]);
     session_start();
+}
+
+if (!defined('BISU_SKIP_AUTO_SESSION') || BISU_SKIP_AUTO_SESSION !== true) {
+    startSessionIfNeeded();
+}
+
+function setPrivatePageHeaders(): void
+{
+    header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+    header('Pragma: no-cache');
 }
 
 function logAuthError(string $message): void
@@ -12,17 +36,14 @@ function logAuthError(string $message): void
 
 function requireAuth(?string $requiredRole = null): array
 {
-    if (session_status() === PHP_SESSION_NONE) {
-        session_start();
-    }
+    startSessionIfNeeded();
+    setPrivatePageHeaders();
 
-    if (empty($_SESSION['user']['id']) || empty($_SESSION['user']['role'])) {
+    $user = getSessionUser();
+    if (empty($user['id']) || empty($user['role'])) {
         logAuthError('Missing session data for access request.');
         throw new RuntimeException('Authentication required');
     }
-
-    $user = $_SESSION['user'];
-    session_write_close();
 
     $allowedRoles = ['student', 'supervisor', 'coordinator', 'admin'];
     if (!in_array($user['role'], $allowedRoles, true)) {
@@ -39,9 +60,7 @@ function requireAuth(?string $requiredRole = null): array
 
 function startUserSession(array $user): void
 {
-    if (session_status() === PHP_SESSION_NONE) {
-        session_start();
-    }
+    startSessionIfNeeded();
     session_regenerate_id(true);
     $companyIds = [];
     if (!empty($user['company_ids']) && is_array($user['company_ids'])) {
@@ -50,6 +69,7 @@ function startUserSession(array $user): void
     if (($user['role'] ?? '') === 'coordinator' && empty($companyIds) && !empty($user['company_id'])) {
         $companyIds = [(int)$user['company_id']];
     }
+    $_SESSION['last_activity'] = time();
     $_SESSION['user'] = [
         'id'           => intval($user['id'] ?? 0),
         'username'     => $user['username'] ?? '',
@@ -73,9 +93,7 @@ function startUserSession(array $user): void
 
 function clearUserSession(): void
 {
-    if (session_status() === PHP_SESSION_NONE) {
-        session_start();
-    }
+    startSessionIfNeeded();
     $_SESSION = [];
     if (ini_get('session.use_cookies')) {
         $params = session_get_cookie_params();
@@ -86,10 +104,17 @@ function clearUserSession(): void
 
 function getSessionUser(): ?array
 {
-    if (session_status() === PHP_SESSION_NONE) {
-        session_start();
-    }
+    startSessionIfNeeded();
     $user = $_SESSION['user'] ?? null;
+    if ($user) {
+        $lifetime = max(1, (int)ini_get('session.gc_maxlifetime'));
+        $lastActivity = $_SESSION['last_activity'] ?? time();
+        if (!is_numeric($lastActivity) || (int)$lastActivity + $lifetime < time()) {
+            clearUserSession();
+            return null;
+        }
+        $_SESSION['last_activity'] = time();
+    }
     session_write_close();
     return $user;
 }

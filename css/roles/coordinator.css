@@ -347,6 +347,7 @@
   .coordinator-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
   .coordinator-toolbar-inline { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .coordinator-records-shell { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+  #coordinator-student-records-table { width: 100%; max-width: 100%; min-width: 0; }
   .coordinator-page-header { padding: 4px 2px 2px; }
   .coordinator-page-title { font-size: 20px; font-weight: 800; color: var(--text); }
   .coordinator-page-subtitle { font-size: 13px; color: var(--text2); margin-top: 4px; }
@@ -364,16 +365,26 @@
   .coordinator-card-actions { margin-top: 12px; display: flex; gap: 8px; }
   .coordinator-pagination { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
   .coordinator-page-buttons { display: flex; gap: 6px; flex-wrap: wrap; }
-  .coordinator-records-table-wrap { width: 100%; max-width: 100%; border: 1px solid var(--border); border-radius: 12px; overflow-x: auto; overflow-y: visible; background: var(--surface); box-shadow: 0 10px 30px rgba(11, 36, 71, 0.05); }
-  .coordinator-records-table { width: max-content; min-width: 100%; border-collapse: separate; border-spacing: 0; font-size: 13px; }
-  .coordinator-records-table th { text-align: left; font-size: 11px; font-weight: 700; color: var(--text3); text-transform: uppercase; letter-spacing: 0.06em; padding: 10px 12px; background: var(--surface2); border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 1; white-space: nowrap; }
-  .coordinator-records-table td { padding: 4px 12px; border-bottom: 1px solid var(--border); vertical-align: middle; white-space: nowrap; }
+  .coordinator-records-table-wrap { width: 100%; max-width: 100%; min-width: 0; box-sizing: border-box; border: 1px solid var(--border); border-radius: 12px; overflow-x: auto; overflow-y: visible; background: var(--surface); box-shadow: 0 10px 30px rgba(11, 36, 71, 0.05); }
+  .coordinator-records-table { width: 100%; max-width: 100%; min-width: 0; box-sizing: border-box; table-layout: fixed; border-collapse: separate; border-spacing: 0; font-size: 12px; }
+  .coordinator-records-table th { text-align: left; font-size: 10px; font-weight: 700; color: var(--text3); text-transform: uppercase; letter-spacing: 0.04em; line-height: 1.25; padding: 8px 6px; background: var(--surface2); border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 1; white-space: normal; overflow-wrap: anywhere; }
+  .coordinator-records-table th:nth-child(1) { width: 12%; }
+  .coordinator-records-table th:nth-child(2) { width: 18%; }
+  .coordinator-records-table th:nth-child(3) { width: 13%; }
+  .coordinator-records-table th:nth-child(4) { width: 8%; }
+  .coordinator-records-table th:nth-child(5) { width: 15%; }
+  .coordinator-records-table th:nth-child(6) { width: 14%; }
+  .coordinator-records-table th:nth-child(7) { width: 10%; }
+  .coordinator-records-table th:nth-child(8) { width: 10%; }
+  .coordinator-records-table td { padding: 5px 6px; border-bottom: 1px solid var(--border); vertical-align: middle; white-space: normal; overflow-wrap: anywhere; }
   .coordinator-records-table td:last-child { padding-top: 4px; padding-bottom: 4px; vertical-align: middle; }
+  .coordinator-records-table .user-cell { min-width: 0; gap: 6px; }
+  .coordinator-records-table .user-cell > div { min-width: 0; }
+  .coordinator-records-table .user-cell-name,
+  .coordinator-records-table .user-cell-sub { overflow-wrap: anywhere; }
+  .coordinator-records-table .coordinator-chip { max-width: 100%; white-space: normal; text-align: center; line-height: 1.2; }
   .coordinator-records-table tbody tr:hover { background: var(--surface2); }
   .coordinator-records-table tbody tr:last-child td { border-bottom: none; }
-  .coordinator-records-table th:last-child, .coordinator-records-table td:last-child { position: sticky; right: 0; z-index: 2; min-width: 190px; background: var(--surface); box-shadow: -8px 0 12px -12px rgba(11, 36, 71, 0.45); }
-  .coordinator-records-table th:last-child { z-index: 3; background: var(--surface2); }
-  .coordinator-records-table tbody tr:hover td:last-child { background: var(--surface2); }
   .coordinator-chip { display: inline-flex; align-items: center; justify-content: center; padding: 4px 8px; border-radius: 999px; font-size: 11px; font-weight: 700; line-height: 1; white-space: nowrap; }
   .coordinator-chip--active { background: #E6F7F2; color: var(--green); }
   .coordinator-chip--pending { background: #FDF3E0; color: var(--amber); }
@@ -383,7 +394,7 @@
   .coordinator-chip--present { background: #E6F7F2; color: var(--green); }
   .coordinator-chip--late { background: #FDF3E0; color: var(--amber); }
   .coordinator-chip--absent { background: #FDECEB; color: var(--red); }
-  .coordinator-action-group { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-width: 166px; height: 22px; line-height: 0; vertical-align: middle; }
+  .coordinator-records-table .coordinator-action-group { display: inline-flex; align-items: center; justify-content: center; gap: 6px; width: 100%; min-width: 0; height: 22px; line-height: 0; vertical-align: middle; }
   .coordinator-action-btn { width: 22px; height: 22px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text2); display: inline-flex; align-items: center; justify-content: center; cursor: pointer; transition: all 0.15s ease; padding: 0; }
   .coordinator-action-btn:hover { transform: translateY(-1px); border-color: var(--teal-light); color: var(--teal); background: #F3FBFC; }
   .coordinator-action-icon { font-size: 12px; line-height: 1; }
@@ -401,6 +412,10 @@
   .text-right { text-align: right; }
   .stat-card.gold::before { background: var(--gold); }
   .coordinator-page-buttons .btn.active { background: var(--navy); color: #fff; }
+
+  @media (max-width: 1100px) {
+    .coordinator-records-table { min-width: 760px; }
+  }
 
   @media print {
     @page { size: A4 portrait; margin: 12mm; }

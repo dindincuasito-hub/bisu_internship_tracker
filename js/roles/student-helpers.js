@@ -79,9 +79,7 @@ function saveProfileSettings() {
 }
 
 function confirmLogout() {
-  if (confirm('Are you sure you want to sign out from all sessions? You will need to log in again.')) {
-    doLogout();
-  }
+  openSignOutConfirmation();
 }
 
 // Helper to render info rows in profile

@@ -1,5 +1,6 @@
 <?php
 require_once __DIR__ . '/../../db.php';
+define('BISU_SKIP_AUTO_SESSION', true);
 require_once __DIR__ . '/../../auth.php';
 header('Content-Type: application/json; charset=utf-8');
 if ($_SERVER['REQUEST_METHOD'] === 'GET') {
@@ -12,6 +13,12 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     echo json_encode(['success' => false, 'message' => 'Method not allowed']);
     exit;
 }
+if (session_status() === PHP_SESSION_ACTIVE) {
+    session_write_close();
+}
+if (session_status() === PHP_SESSION_NONE) {
+    session_id('');
+}
 $email = trim($_POST['email'] ?? '');
 $password = trim($_POST['password'] ?? '');
 $role = 'coordinator';
@@ -21,7 +28,7 @@ if ($email === '' || $password === '') {
     exit;
 }
 try {
-    $pdo = getDbConnection();
+    $pdo = getDbConnection(false, false);
     $user = authenticateUser($pdo, $email, $password, $role);
     if (!$user) {
         echo json_encode(['success' => false, 'message' => 'Invalid credentials']);
@@ -30,17 +37,8 @@ try {
     startUserSession($user);
     recordUserAccessEvent($pdo, $user, 'Login');
     echo json_encode(['success' => true, 'role' => $role, 'email' => $user['email'], 'name' => $user['name'], 'message' => 'Login successful']);
-} catch (Exception $e) {
-    if (isDatabaseUnavailable($e)) {
-        $user = authenticateDemoUser($email, $password, $role);
-        if ($user) {
-            startUserSession($user);
-            echo json_encode(['success' => true, 'role' => $role, 'email' => $user['email'], 'name' => $user['name'], 'message' => 'Login successful (demo mode)']);
-            exit;
-        }
-        echo json_encode(['success' => false, 'message' => 'Invalid credentials']);
-        exit;
-    }
-    http_response_code(500);
-    echo json_encode(['success' => false, 'message' => 'Server error: ' . $e->getMessage()]);
+} catch (Throwable $e) {
+    error_log('[login][coordinator] Authentication request failed: ' . $e->getMessage());
+    http_response_code(isDatabaseUnavailable($e) ? 503 : 500);
+    echo json_encode(['success' => false, 'message' => isDatabaseUnavailable($e) ? 'The sign-in database is unavailable.' : 'The sign-in service could not complete your request. Please try again.']);
 }

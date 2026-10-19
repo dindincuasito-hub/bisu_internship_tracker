@@ -2,7 +2,7 @@
 require_once __DIR__ . '/../../auth.php';
 header('Content-Type: text/html; charset=utf-8');
 try {
-    $user = requireAuth();
+    $user = requireAuth('student');
 } catch (Throwable $e) {
     header('Location: /bisu_internship_tracker/html/bisu_internship_tracker%20(1).html');
     exit;

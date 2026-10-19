@@ -2,24 +2,16 @@
 
 function getDbConfig(): array
 {
-    $localConfigPath = __DIR__ . '/db.local.php';
-    if (is_file($localConfigPath)) {
-        $localConfig = require $localConfigPath;
-        if (is_array($localConfig)) {
-            return $localConfig;
-        }
-    }
-
     return [
-        'host' => getenv('DB_HOST') ?: 'localhost',
-        'dbname' => getenv('DB_NAME') ?: 'internship_tracker',
-        'user' => getenv('DB_USER') ?: 'root',
-        'pass' => getenv('DB_PASS') ?: '',
-        'charset' => getenv('DB_CHARSET') ?: 'utf8mb4',
+        'host' => '127.0.0.1',
+        'dbname' => 'bisu_internship_tracker',
+        'user' => 'root',
+        'pass' => '',
+        'charset' => 'utf8mb4',
     ];
 }
 
-function getDbConnection(): PDO
+function getDbConnection(bool $initializeSchema = true, bool $createMissingDatabase = true): PDO
 {
     $config = getDbConfig();
     $options = [
@@ -37,7 +29,7 @@ function getDbConnection(): PDO
             $options
         );
     } catch (PDOException $e) {
-        if ($e->getCode() === 1049 || (int)$e->getCode() === 1049) {
+        if (($e->getCode() === 1049 || (int)$e->getCode() === 1049) && $createMissingDatabase) {
             createDatabase($config, $options);
             $pdo = new PDO(
                 "mysql:host={$config['host']};dbname={$config['dbname']};charset={$config['charset']}",
@@ -50,7 +42,12 @@ function getDbConnection(): PDO
         }
     }
 
-    initializeDatabase($pdo);
+    if ($initializeSchema) {
+        initializeDatabase($pdo);
+    } else {
+        $pdo->exec('SET SESSION lock_wait_timeout = 5');
+        $pdo->exec('SET SESSION innodb_lock_wait_timeout = 5');
+    }
     return $pdo;
 }
 
@@ -288,7 +285,10 @@ function initializeDatabase(PDO $pdo): void
             contact_email VARCHAR(160) DEFAULT '',
             contact_phone VARCHAR(60) DEFAULT '',
             address TEXT DEFAULT NULL,
-            status ENUM('Active','Pending','Inactive') NOT NULL DEFAULT 'Active',
+            latitude DECIMAL(10,8) DEFAULT NULL,
+            longitude DECIMAL(11,8) DEFAULT NULL,
+            allowed_radius_meters INT NOT NULL DEFAULT 100,
+            status ENUM('Active','Inactive') NOT NULL DEFAULT 'Active',
             created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
             UNIQUE KEY company_name_unique (name)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;"
@@ -297,6 +297,23 @@ function initializeDatabase(PDO $pdo): void
     $contactPersonCheck = $pdo->query("SELECT COUNT(*) AS count FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'companies' AND COLUMN_NAME = 'contact_person'")->fetch();
     if ($contactPersonCheck && intval($contactPersonCheck['count']) === 0) {
         $pdo->exec("ALTER TABLE companies ADD COLUMN contact_person VARCHAR(160) NOT NULL DEFAULT '' AFTER location");
+    }
+
+    $companyColumns = $pdo->query("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='companies'")->fetchAll(PDO::FETCH_COLUMN);
+    if (!in_array('latitude', $companyColumns, true)) {
+        $pdo->exec("ALTER TABLE companies ADD COLUMN latitude DECIMAL(10,8) DEFAULT NULL AFTER address");
+    }
+    if (!in_array('longitude', $companyColumns, true)) {
+        $pdo->exec("ALTER TABLE companies ADD COLUMN longitude DECIMAL(11,8) DEFAULT NULL AFTER latitude");
+    }
+    if (!in_array('allowed_radius_meters', $companyColumns, true)) {
+        $pdo->exec("ALTER TABLE companies ADD COLUMN allowed_radius_meters INT NOT NULL DEFAULT 100 AFTER longitude");
+    }
+
+    $companyStatusType = $pdo->query("SELECT COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='companies' AND COLUMN_NAME='status'")->fetchColumn();
+    if (is_string($companyStatusType) && strpos($companyStatusType, "'Pending'") !== false) {
+        $pdo->exec("UPDATE companies SET status='Inactive' WHERE status='Pending'");
+        $pdo->exec("ALTER TABLE companies MODIFY status ENUM('Active','Inactive') NOT NULL DEFAULT 'Active'");
     }
 
     $pdo->exec(
@@ -309,7 +326,7 @@ function initializeDatabase(PDO $pdo): void
             school_year_id INT DEFAULT NULL,
             program_code VARCHAR(20) DEFAULT NULL,
             internship_status ENUM('Pending','Approved','Ongoing','Completed') NOT NULL DEFAULT 'Pending',
-            hours_completed INT NOT NULL DEFAULT 0,
+            hours_completed DECIMAL(8,2) NOT NULL DEFAULT 0,
             hours_required INT NOT NULL DEFAULT 500,
             evaluation_score DECIMAL(5,2) DEFAULT NULL,
             completion_cleared TINYINT(1) NOT NULL DEFAULT 0,
@@ -324,6 +341,10 @@ function initializeDatabase(PDO $pdo): void
             UNIQUE KEY assignment_student_unique (student_id)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;"
     );
+    $hoursCompletedColumn = $pdo->query("SHOW COLUMNS FROM assignments LIKE 'hours_completed'")->fetch(PDO::FETCH_ASSOC);
+    if ($hoursCompletedColumn && str_starts_with(strtolower((string)$hoursCompletedColumn['Type']), 'int')) {
+        $pdo->exec('ALTER TABLE assignments MODIFY hours_completed DECIMAL(8,2) NOT NULL DEFAULT 0');
+    }
 
     $pdo->exec(
         "CREATE TABLE IF NOT EXISTS coordinator_company (
@@ -362,6 +383,41 @@ function initializeDatabase(PDO $pdo): void
             duration_minutes INT DEFAULT NULL,
             face_snapshot_in LONGTEXT DEFAULT NULL,
             face_snapshot_out LONGTEXT DEFAULT NULL,
+            time_in_latitude DECIMAL(10,8) DEFAULT NULL,
+            time_in_longitude DECIMAL(11,8) DEFAULT NULL,
+            time_in_accuracy DECIMAL(10,2) DEFAULT NULL,
+            time_in_address VARCHAR(500) DEFAULT NULL,
+            time_in_distance DECIMAL(10,2) DEFAULT NULL,
+            time_in_distance_meters DECIMAL(10,2) DEFAULT NULL,
+            time_in_location_status ENUM('Verified','Not Verified','Pending') NOT NULL DEFAULT 'Pending',
+            time_out_latitude DECIMAL(10,8) DEFAULT NULL,
+            time_out_longitude DECIMAL(11,8) DEFAULT NULL,
+            time_out_accuracy DECIMAL(10,2) DEFAULT NULL,
+            time_out_address VARCHAR(500) DEFAULT NULL,
+            time_out_distance DECIMAL(10,2) DEFAULT NULL,
+            time_out_distance_meters DECIMAL(10,2) DEFAULT NULL,
+            time_out_location_status ENUM('Verified','Not Verified','Pending') NOT NULL DEFAULT 'Pending',
+            time_out_verification_status ENUM('Verified','Failed','Pending') NOT NULL DEFAULT 'Pending',
+            afternoon_time_in DATETIME DEFAULT NULL,
+            afternoon_time_out DATETIME DEFAULT NULL,
+            afternoon_face_snapshot_in LONGTEXT DEFAULT NULL,
+            afternoon_face_snapshot_out LONGTEXT DEFAULT NULL,
+            afternoon_time_in_latitude DECIMAL(10,8) DEFAULT NULL,
+            afternoon_time_in_longitude DECIMAL(11,8) DEFAULT NULL,
+            afternoon_time_in_accuracy DECIMAL(10,2) DEFAULT NULL,
+            afternoon_time_in_address VARCHAR(500) DEFAULT NULL,
+            afternoon_time_in_distance DECIMAL(10,2) DEFAULT NULL,
+            afternoon_time_in_distance_meters DECIMAL(10,2) DEFAULT NULL,
+            afternoon_time_in_location_status ENUM('Verified','Not Verified','Pending') NOT NULL DEFAULT 'Pending',
+            afternoon_time_in_verification_status ENUM('Verified','Failed','Pending') NOT NULL DEFAULT 'Pending',
+            afternoon_time_out_latitude DECIMAL(10,8) DEFAULT NULL,
+            afternoon_time_out_longitude DECIMAL(11,8) DEFAULT NULL,
+            afternoon_time_out_accuracy DECIMAL(10,2) DEFAULT NULL,
+            afternoon_time_out_address VARCHAR(500) DEFAULT NULL,
+            afternoon_time_out_distance DECIMAL(10,2) DEFAULT NULL,
+            afternoon_time_out_distance_meters DECIMAL(10,2) DEFAULT NULL,
+            afternoon_time_out_location_status ENUM('Verified','Not Verified','Pending') NOT NULL DEFAULT 'Pending',
+            afternoon_time_out_verification_status ENUM('Verified','Failed','Pending') NOT NULL DEFAULT 'Pending',
             verification_status ENUM('Verified','Failed','Pending') NOT NULL DEFAULT 'Pending',
             status ENUM('Present','Late','Absent','Excused') NOT NULL DEFAULT 'Present',
             remarks VARCHAR(255) DEFAULT NULL,
@@ -372,6 +428,28 @@ function initializeDatabase(PDO $pdo): void
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;"
     );
     try {
+        $attendanceColumns = $pdo->query("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='attendance_logs'")->fetchAll(PDO::FETCH_COLUMN);
+        $attendanceMigrations = [
+            ['time_in_latitude', "ALTER TABLE attendance_logs ADD COLUMN time_in_latitude DECIMAL(10,8) DEFAULT NULL AFTER face_snapshot_out"],
+            ['time_in_longitude', "ALTER TABLE attendance_logs ADD COLUMN time_in_longitude DECIMAL(11,8) DEFAULT NULL AFTER time_in_latitude"],
+            ['time_in_accuracy', "ALTER TABLE attendance_logs ADD COLUMN time_in_accuracy DECIMAL(10,2) DEFAULT NULL AFTER time_in_longitude"],
+            ['time_in_address', "ALTER TABLE attendance_logs ADD COLUMN time_in_address VARCHAR(500) DEFAULT NULL AFTER time_in_accuracy"],
+            ['time_in_distance', "ALTER TABLE attendance_logs ADD COLUMN time_in_distance DECIMAL(10,2) DEFAULT NULL AFTER time_in_accuracy"],
+            ['time_in_distance_meters', "ALTER TABLE attendance_logs ADD COLUMN time_in_distance_meters DECIMAL(10,2) DEFAULT NULL AFTER time_in_distance"],
+            ['time_in_location_status', "ALTER TABLE attendance_logs ADD COLUMN time_in_location_status ENUM('Verified','Not Verified','Pending') NOT NULL DEFAULT 'Pending' AFTER time_in_distance_meters"],
+            ['time_out_latitude', "ALTER TABLE attendance_logs ADD COLUMN time_out_latitude DECIMAL(10,8) DEFAULT NULL AFTER time_in_location_status"],
+            ['time_out_longitude', "ALTER TABLE attendance_logs ADD COLUMN time_out_longitude DECIMAL(11,8) DEFAULT NULL AFTER time_out_latitude"],
+            ['time_out_accuracy', "ALTER TABLE attendance_logs ADD COLUMN time_out_accuracy DECIMAL(10,2) DEFAULT NULL AFTER time_out_longitude"],
+            ['time_out_address', "ALTER TABLE attendance_logs ADD COLUMN time_out_address VARCHAR(500) DEFAULT NULL AFTER time_out_accuracy"],
+            ['time_out_distance', "ALTER TABLE attendance_logs ADD COLUMN time_out_distance DECIMAL(10,2) DEFAULT NULL AFTER time_out_accuracy"],
+            ['time_out_distance_meters', "ALTER TABLE attendance_logs ADD COLUMN time_out_distance_meters DECIMAL(10,2) DEFAULT NULL AFTER time_out_distance"],
+            ['time_out_location_status', "ALTER TABLE attendance_logs ADD COLUMN time_out_location_status ENUM('Verified','Not Verified','Pending') NOT NULL DEFAULT 'Pending' AFTER time_out_distance_meters"],
+        ];
+        foreach ($attendanceMigrations as [$columnName, $sql]) {
+            if (!in_array($columnName, $attendanceColumns, true)) {
+                $pdo->exec($sql);
+            }
+        }
         $verificationColumn = $pdo->query("SHOW COLUMNS FROM attendance_logs LIKE 'verification_status'")->fetch();
         if (!$verificationColumn) {
             $pdo->exec("ALTER TABLE attendance_logs ADD COLUMN verification_status ENUM('Verified','Failed','Pending') NOT NULL DEFAULT 'Pending' AFTER face_snapshot_out");
@@ -380,6 +458,37 @@ function initializeDatabase(PDO $pdo): void
     } catch (Exception $e) {
         // Keep older installations usable if the attendance migration is unavailable.
     }
+
+    $attendanceEventColumns = [
+        'time_out_verification_status' => "ALTER TABLE attendance_logs ADD COLUMN time_out_verification_status ENUM('Verified','Failed','Pending') NOT NULL DEFAULT 'Pending'",
+        'afternoon_time_in' => 'ALTER TABLE attendance_logs ADD COLUMN afternoon_time_in DATETIME DEFAULT NULL',
+        'afternoon_time_out' => 'ALTER TABLE attendance_logs ADD COLUMN afternoon_time_out DATETIME DEFAULT NULL',
+        'afternoon_face_snapshot_in' => 'ALTER TABLE attendance_logs ADD COLUMN afternoon_face_snapshot_in LONGTEXT DEFAULT NULL',
+        'afternoon_face_snapshot_out' => 'ALTER TABLE attendance_logs ADD COLUMN afternoon_face_snapshot_out LONGTEXT DEFAULT NULL',
+        'afternoon_time_in_latitude' => 'ALTER TABLE attendance_logs ADD COLUMN afternoon_time_in_latitude DECIMAL(10,8) DEFAULT NULL',
+        'afternoon_time_in_longitude' => 'ALTER TABLE attendance_logs ADD COLUMN afternoon_time_in_longitude DECIMAL(11,8) DEFAULT NULL',
+        'afternoon_time_in_accuracy' => 'ALTER TABLE attendance_logs ADD COLUMN afternoon_time_in_accuracy DECIMAL(10,2) DEFAULT NULL',
+        'afternoon_time_in_address' => 'ALTER TABLE attendance_logs ADD COLUMN afternoon_time_in_address VARCHAR(500) DEFAULT NULL',
+        'afternoon_time_in_distance' => 'ALTER TABLE attendance_logs ADD COLUMN afternoon_time_in_distance DECIMAL(10,2) DEFAULT NULL',
+        'afternoon_time_in_distance_meters' => 'ALTER TABLE attendance_logs ADD COLUMN afternoon_time_in_distance_meters DECIMAL(10,2) DEFAULT NULL',
+        'afternoon_time_in_location_status' => "ALTER TABLE attendance_logs ADD COLUMN afternoon_time_in_location_status ENUM('Verified','Not Verified','Pending') NOT NULL DEFAULT 'Pending'",
+        'afternoon_time_in_verification_status' => "ALTER TABLE attendance_logs ADD COLUMN afternoon_time_in_verification_status ENUM('Verified','Failed','Pending') NOT NULL DEFAULT 'Pending'",
+        'afternoon_time_out_latitude' => 'ALTER TABLE attendance_logs ADD COLUMN afternoon_time_out_latitude DECIMAL(10,8) DEFAULT NULL',
+        'afternoon_time_out_longitude' => 'ALTER TABLE attendance_logs ADD COLUMN afternoon_time_out_longitude DECIMAL(11,8) DEFAULT NULL',
+        'afternoon_time_out_accuracy' => 'ALTER TABLE attendance_logs ADD COLUMN afternoon_time_out_accuracy DECIMAL(10,2) DEFAULT NULL',
+        'afternoon_time_out_address' => 'ALTER TABLE attendance_logs ADD COLUMN afternoon_time_out_address VARCHAR(500) DEFAULT NULL',
+        'afternoon_time_out_distance' => 'ALTER TABLE attendance_logs ADD COLUMN afternoon_time_out_distance DECIMAL(10,2) DEFAULT NULL',
+        'afternoon_time_out_distance_meters' => 'ALTER TABLE attendance_logs ADD COLUMN afternoon_time_out_distance_meters DECIMAL(10,2) DEFAULT NULL',
+        'afternoon_time_out_location_status' => "ALTER TABLE attendance_logs ADD COLUMN afternoon_time_out_location_status ENUM('Verified','Not Verified','Pending') NOT NULL DEFAULT 'Pending'",
+        'afternoon_time_out_verification_status' => "ALTER TABLE attendance_logs ADD COLUMN afternoon_time_out_verification_status ENUM('Verified','Failed','Pending') NOT NULL DEFAULT 'Pending'",
+    ];
+    $attendanceEventExistingColumns = $pdo->query("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='attendance_logs'")->fetchAll(PDO::FETCH_COLUMN);
+    foreach ($attendanceEventColumns as $columnName => $migrationSql) {
+        if (!in_array($columnName, $attendanceEventExistingColumns, true)) {
+            $pdo->exec($migrationSql);
+        }
+    }
+    $pdo->exec("UPDATE attendance_logs SET time_out_verification_status=verification_status WHERE time_out IS NOT NULL AND time_out_verification_status='Pending' AND verification_status IN ('Verified','Failed')");
 
     $pdo->exec(
         "CREATE TABLE IF NOT EXISTS tasks (
@@ -627,57 +736,9 @@ function initializeDatabase(PDO $pdo): void
     }
 }
 
-function getDemoAccounts(): array
+function isDatabaseUnavailable(Throwable $e): bool
 {
-    return [
-        'jdc' => ['name' => 'Juan dela Cruz', 'email' => 'jdc@student.bisu.edu.ph', 'username' => 'jdc', 'password' => 'student123', 'role' => 'student'],
-        'ojt' => ['name' => 'Tech Solutions Inc.', 'email' => 'ojt@techsolutions.ph', 'username' => 'ojt', 'password' => 'supervisor123', 'role' => 'supervisor'],
-        'me.santos' => ['name' => 'Ma. Santos', 'email' => 'me.santos@bisu.edu.ph', 'username' => 'me.santos', 'password' => 'coordinator123', 'role' => 'coordinator'],
-        'admin' => ['name' => 'Admin User', 'email' => 'admin@bisu.edu.ph', 'username' => 'admin', 'password' => 'admin123', 'role' => 'admin'],
-    ];
-}
-
-function authenticateDemoUser(string $username, string $password, string $role): ?array
-{
-    $key = strtolower(trim($username));
-    $accounts = getDemoAccounts();
-    if (!isset($accounts[$key])) {
-        return null;
-    }
-    $account = $accounts[$key];
-    if ($account['role'] !== $role || $password !== $account['password']) {
-        return null;
-    }
-    return [
-        'id' => 0,
-        'name' => $account['name'],
-        'email' => $account['email'],
-        'username' => $account['username'],
-        'role' => $account['role'],
-        'status' => 'Active',
-        'created' => date('Y-m-d H:i:s'),
-        'last_login' => date('Y-m-d H:i:s'),
-    ];
-}
-
-function isDatabaseUnavailable(Exception $e): bool
-{
-    if (!($e instanceof PDOException)) {
-        return false;
-    }
-    $code = (string) $e->getCode();
-    if (in_array($code, ['2002', '2003', '2006', '2013', '1130'], true)) {
-        return true;
-    }
-    $message = strtolower($e->getMessage());
-    return strpos($message, 'target machine actively refused') !== false
-        || strpos($message, 'connection refused') !== false
-        || strpos($message, 'no connection could be made') !== false
-        || strpos($message, 'server has gone away') !== false
-        || strpos($message, 'lost connection') !== false
-        || strpos($message, 'could not find driver') !== false
-        || strpos($message, 'pdo_mysql') !== false
-        || (strpos($message, 'host') !== false && strpos($message, 'not allowed to connect') !== false);
+    return $e instanceof PDOException;
 }
 
 function authenticateUser(PDO $pdo, string $username, string $password, string $role): ?array
@@ -692,10 +753,12 @@ function authenticateUser(PDO $pdo, string $username, string $password, string $
             $stmt = $pdo->prepare("SELECT {$fields} FROM users u LEFT JOIN programs p ON p.id = u.program_id LEFT JOIN companies c ON c.id = u.company_id WHERE u.email = ? AND u.role = ? LIMIT 1");
             $stmt->execute([$username, $role]);
             $user = $stmt->fetch();
-            if (!$user) {
-                return null;
-            }
         } else {
+            $stmt = $pdo->prepare("SELECT {$fields} FROM users u LEFT JOIN programs p ON p.id = u.program_id LEFT JOIN companies c ON c.id = u.company_id WHERE SUBSTRING_INDEX(u.email, '@', 1) = ? AND u.role = ? LIMIT 1");
+            $stmt->execute([$username, $role]);
+            $user = $stmt->fetch();
+        }
+        if (!$user) {
             return null;
         }
     }
@@ -724,6 +787,10 @@ function getUserByUsernameAndRole(PDO $pdo, string $username, string $role): ?ar
     $user = $stmt->fetch();
     if (!$user && strpos($username, '@') !== false) {
         $stmt = $pdo->prepare('SELECT id, name, email, username, role, status FROM users WHERE email = ? AND role = ? LIMIT 1');
+        $stmt->execute([$username, $role]);
+        $user = $stmt->fetch();
+    } elseif (!$user) {
+        $stmt = $pdo->prepare("SELECT id, name, email, username, role, status FROM users WHERE SUBSTRING_INDEX(email, '@', 1) = ? AND role = ? LIMIT 1");
         $stmt->execute([$username, $role]);
         $user = $stmt->fetch();
     }

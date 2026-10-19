@@ -28,6 +28,28 @@ function viewSubmissionFile(ref) {
   window.open(`${apiBase}?resource=submissions&download=${encodeURIComponent(submission.id)}`, '_blank', 'noopener');
 }
 
+function reviewSupervisorSubmission(ref) {
+  const submission = resolveSubmissionByRef(ref);
+  if (!submission || !Number.isInteger(Number(submission.id)) || Number(submission.id) <= 0) {
+    alert('This submission is no longer available. Refresh the dashboard and try again.');
+    return;
+  }
+
+  window.SUPERVISOR_SUBMISSION_TARGET = {
+    submissionId: Number(submission.id),
+    taskId: Number(submission.taskId) || 0,
+    studentId: Number(submission.studentId) || 0,
+  };
+  navigateTo('submissions');
+}
+
+function formatDisplayDate(dateString) {
+  if (!dateString) return 'Selected Date';
+  const value = new Date(`${dateString}T00:00:00`);
+  if (Number.isNaN(value.getTime())) return dateString;
+  return value.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+}
+
 // ── TASK MANAGEMENT ──
 async function openAssignTaskModal(mode, index = null) {
   if (typeof loadSupervisorStudents === 'function' && !SUPERVISOR_STUDENTS_LOADED) await loadSupervisorStudents();
@@ -108,9 +130,7 @@ function resolveSubmissionByRef(ref) {
   if (ref === null || ref === undefined || ref === '') return null;
   const numericRef = Number(ref);
   if (!Number.isNaN(numericRef)) {
-    const byId = SUBMISSIONS.find(submission => Number(submission.id) === numericRef);
-    if (byId) return byId;
-    return SUBMISSIONS[numericRef] || null;
+    return SUBMISSIONS.find(submission => Number(submission.id) === numericRef) || null;
   }
   return null;
 }
@@ -124,13 +144,14 @@ function approveSubmission(ref) {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: params.toString()
-  }).then(response => response.json()).then(data => {
+  }).then(response => response.json()).then(async data => {
     if (!data.success) throw new Error(data.message || 'Unable to approve submission.');
     const target = SUBMISSIONS.find(item => Number(item.id) === Number(submission.id));
     if (target) {
       target.status = 'Approved';
       target.tag = 'tag-green';
     }
+    await loadSupervisorTasks();
     addNotification(`✓ Approved submission from ${submission.student}: ${submission.name}`, 'success');
     navigateTo('submissions');
   }).catch(error => alert(error.message || 'Unable to approve submission.'));
@@ -161,13 +182,14 @@ function rejectSubmission(ref) {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: params.toString()
-    }).then(response => response.json()).then(data => {
+    }).then(response => response.json()).then(async data => {
       if (!data.success) throw new Error(data.message || 'Unable to reject submission.');
       const target = SUBMISSIONS.find(item => Number(item.id) === Number(submission.id));
       if (target) {
         target.status = 'Rejected';
         target.tag = 'tag-red';
       }
+      await loadSupervisorTasks();
       addNotification(`Submission from ${submission.student} rejected. Feedback sent.`, 'warning');
       navigateTo('submissions');
     }).catch(error => alert(error.message || 'Unable to reject submission.'));
@@ -202,25 +224,34 @@ function submitStudentEvaluation() {
 
 // ── ATTENDANCE FILTERING ──
 function filterAttendanceByDate(dateStr) {
-  console.log('Filtering attendance for date:', dateStr);
-  // In a real app, this would filter ATTENDANCE_LOG by date
-  addNotification(`Attendance filtered for ${dateStr}`, 'info');
+  SUPERVISOR_ATTENDANCE_DATE_FILTER = dateStr || '';
+  if (currentRole === 'supervisor' && currentPage === 'attendance') {
+    navigateTo('attendance');
+  }
 }
 
 function filterAttendanceByStudent(studentName) {
-  console.log('Filtering attendance for student:', studentName);
-  addNotification(`Attendance filtered for ${studentName}`, 'info');
+  SUPERVISOR_ATTENDANCE_STUDENT_FILTER = studentName || '';
+  if (currentRole === 'supervisor' && currentPage === 'attendance') {
+    navigateTo('attendance');
+  }
 }
 
 function exportAttendanceLog() {
-  const headers = ['Date', 'Student', 'Time In', 'Time Out', 'Duration', 'Face Confidence', 'Status'];
-  const rows = [
-    ['Apr 29, 2026', 'Juan dela Cruz', '8:02 AM', '5:03 PM', '9.1 hrs', '98.4%', 'Present'],
-    ['Apr 29, 2026', 'Paolo Mendoza', '7:55 AM', '5:00 PM', '9.1 hrs', '97.1%', 'Present'],
-    ['Apr 28, 2026', 'Lisa Ocampo', '8:15 AM', '5:10 PM', '8.9 hrs', '96.3%', 'Late'],
-  ].map(r => r.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(','));
-  
-  const csv = [headers.join(','), ...rows].join('\r\n');
+  const rows = getSupervisorAttendanceSummaryRows();
+  const headers = ['Date', 'Student', 'Morning Time In', 'Morning Time Out', 'Afternoon Time In', 'Afternoon Time Out', 'Total Hours', 'Status'];
+  const csvRows = rows.map(item => [
+    item.log_date || item.date || '',
+    item.student_name || '',
+    item.time_in ? formatAttendanceTime(item.time_in) : '',
+    item.time_out ? formatAttendanceTime(item.time_out) : '',
+    item.afternoon_time_in ? formatAttendanceTime(item.afternoon_time_in) : '',
+    item.afternoon_time_out ? formatAttendanceTime(item.afternoon_time_out) : '',
+    formatSupervisorAttendanceHours(item.total_seconds || 0),
+    item.status || 'Pending',
+  ].map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(','));
+
+  const csv = [headers.join(','), ...csvRows].join('\r\n');
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');

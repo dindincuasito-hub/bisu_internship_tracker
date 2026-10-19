@@ -93,8 +93,17 @@ switch ($action) {
             sendError(400, 'Invalid role selected.');
         }
         if ($role === 'coordinator' || $role === 'student') {
+            if ($programId <= 0 && $program !== '') {
+                $programCheck = $pdo->prepare('SELECT id, code FROM programs WHERE LOWER(code)=LOWER(?) OR LOWER(name)=LOWER(?) LIMIT 1');
+                $programCheck->execute([$program, $program]);
+                $programRow = $programCheck->fetch(PDO::FETCH_ASSOC);
+                if ($programRow) {
+                    $programId = (int)($programRow['id'] ?? 0);
+                    $program = (string)($programRow['code'] ?? $program);
+                }
+            }
             if ($programId <= 0) {
-            sendError(400, 'Program is required for this account.');
+                sendError(400, 'Program is required for this account.');
             }
             $programCheck = $pdo->prepare('SELECT code FROM programs WHERE id=? LIMIT 1');
             $programCheck->execute([$programId]);
@@ -104,17 +113,19 @@ switch ($action) {
             }
             $program = $programCode;
             if ($role === 'coordinator') {
-                if (empty($companyIds)) {
-                    sendError(400, 'Company is required for Coordinator accounts.');
+                if (!empty($companyIds)) {
+                    $companyId = (int)($companyIds[0] ?? 0);
+                    $companyCheck = $pdo->prepare('SELECT name FROM companies WHERE id=? LIMIT 1');
+                    $companyCheck->execute([$companyId]);
+                    $companyName = $companyCheck->fetchColumn();
+                    if (!$companyName) {
+                        sendError(400, 'Selected company does not exist.');
+                    }
+                    $company = $companyName;
+                } else {
+                    $company = '';
+                    $companyId = 0;
                 }
-                $companyId = (int)($companyIds[0] ?? 0);
-                $companyCheck = $pdo->prepare('SELECT name FROM companies WHERE id=? LIMIT 1');
-                $companyCheck->execute([$companyId]);
-                $companyName = $companyCheck->fetchColumn();
-                if (!$companyName) {
-                    sendError(400, 'Selected company does not exist.');
-                }
-                $company = $companyName;
             }
         } elseif ($role === 'supervisor') {
             if ($companyId <= 0) {
@@ -221,8 +232,17 @@ switch ($action) {
             sendError(400, 'Invalid role selected.');
         }
         if ($role === 'coordinator' || $role === 'student') {
+            if ($programId <= 0 && $program !== '') {
+                $programCheck = $pdo->prepare('SELECT id, code FROM programs WHERE LOWER(code)=LOWER(?) OR LOWER(name)=LOWER(?) LIMIT 1');
+                $programCheck->execute([$program, $program]);
+                $programRow = $programCheck->fetch(PDO::FETCH_ASSOC);
+                if ($programRow) {
+                    $programId = (int)($programRow['id'] ?? 0);
+                    $program = (string)($programRow['code'] ?? $program);
+                }
+            }
             if ($programId <= 0) {
-            sendError(400, 'Program is required for this account.');
+                sendError(400, 'Program is required for this account.');
             }
             $programCheck = $pdo->prepare('SELECT code FROM programs WHERE id=? LIMIT 1');
             $programCheck->execute([$programId]);
@@ -232,17 +252,19 @@ switch ($action) {
             }
             $program = $programCode;
             if ($role === 'coordinator') {
-                if (empty($companyIds)) {
-                    sendError(400, 'Company is required for Coordinator accounts.');
+                if (!empty($companyIds)) {
+                    $companyId = (int)($companyIds[0] ?? 0);
+                    $companyCheck = $pdo->prepare('SELECT name FROM companies WHERE id=? LIMIT 1');
+                    $companyCheck->execute([$companyId]);
+                    $companyName = $companyCheck->fetchColumn();
+                    if (!$companyName) {
+                        sendError(400, 'Selected company does not exist.');
+                    }
+                    $company = $companyName;
+                } else {
+                    $company = '';
+                    $companyId = 0;
                 }
-                $companyId = (int)($companyIds[0] ?? 0);
-                $companyCheck = $pdo->prepare('SELECT name FROM companies WHERE id=? LIMIT 1');
-                $companyCheck->execute([$companyId]);
-                $companyName = $companyCheck->fetchColumn();
-                if (!$companyName) {
-                    sendError(400, 'Selected company does not exist.');
-                }
-                $company = $companyName;
             }
         } elseif ($role === 'supervisor') {
             if ($companyId <= 0) {

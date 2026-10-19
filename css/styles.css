@@ -583,3 +583,37 @@
   .info-list li { display: flex; align-items: flex-start; gap: 10px; color: var(--text2); font-size: 14px; }
   .info-list li::before { content: '•'; color: var(--teal); margin-top: 3px; }
   .modal-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 20px; }
+  .signout-overlay {
+    position: fixed; inset: 0; z-index: 1200; padding: 20px;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(11, 36, 71, 0.42);
+  }
+  .signout-dialog {
+    width: min(100%, 420px); padding: 28px; border: 1px solid var(--border);
+    border-radius: 14px; background: var(--surface); color: var(--text);
+    box-shadow: 0 24px 70px rgba(11, 36, 71, 0.2); text-align: center;
+    outline: none;
+  }
+  .signout-icon {
+    width: 48px; height: 48px; margin: 0 auto 14px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--red-bg); color: var(--red); font-size: 20px;
+  }
+  .signout-title { margin: 0 0 8px; font-size: 20px; font-weight: 700; }
+  .signout-message { margin: 0; color: var(--text2); font-size: 14px; line-height: 1.5; }
+  .signout-actions { display: flex; gap: 10px; margin-top: 24px; }
+  .signout-actions button {
+    flex: 1; min-height: 42px; padding: 10px 16px; border: 1px solid transparent;
+    border-radius: 8px; font: inherit; font-weight: 700; cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease, opacity 0.15s ease;
+  }
+  .signout-cancel { background: var(--surface2); border-color: var(--border) !important; color: var(--text); }
+  .signout-cancel:hover { background: var(--bg); }
+  .signout-confirm { background: var(--red); color: #fff; }
+  .signout-confirm:hover { background: #a93226; }
+  .signout-actions button:focus-visible { outline: 3px solid rgba(22, 89, 168, 0.28); outline-offset: 2px; }
+  .signout-actions button:disabled { opacity: 0.65; cursor: wait; }
+  @media (max-width: 480px) {
+    .signout-dialog { padding: 24px 20px; }
+    .signout-actions { flex-direction: column-reverse; }
+  }

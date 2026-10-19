@@ -59,15 +59,145 @@ function verifyStudentFace(PDO $pdo, int $userId, string $submittedEncoding): vo
     }
 }
 
+function parseCoordinatePair(array $payload, string $label, bool $required = false): ?array
+{
+    $latitudeRaw = trim((string)($payload['latitude'] ?? ''));
+    $longitudeRaw = trim((string)($payload['longitude'] ?? ''));
+    if ($latitudeRaw === '' && $longitudeRaw === '' && !$required) {
+        return null;
+    }
+    if ($latitudeRaw === '' || $longitudeRaw === '' || !is_numeric($latitudeRaw) || !is_numeric($longitudeRaw)) {
+        sendError($label . ' latitude and longitude are both required and must be numeric.', 400);
+    }
+
+    $latitude = (float)$latitudeRaw;
+    $longitude = (float)$longitudeRaw;
+    if ($latitude < -90 || $latitude > 90 || $longitude < -180 || $longitude > 180) {
+        sendError($label . ' coordinates are outside valid ranges.', 400);
+    }
+
+    return ['latitude' => $latitude, 'longitude' => $longitude];
+}
+
+function parseAllowedRadiusMeters(array $payload): int
+{
+    $rawRadius = trim((string)($payload['allowed_radius_meters'] ?? ''));
+    if ($rawRadius === '') {
+        return 100;
+    }
+    if (!ctype_digit($rawRadius) || (int)$rawRadius < 1 || (int)$rawRadius > 10000) {
+        sendError('Allowed radius must be a whole number between 1 and 10000 meters.', 400);
+    }
+    return (int)$rawRadius;
+}
+
+function getAssignedCompanyCoordinates(PDO $pdo, int $userId): ?array
+{
+    $stmt = $pdo->prepare('SELECT c.latitude, c.longitude, c.allowed_radius_meters FROM assignments a LEFT JOIN companies c ON c.id = a.company_id WHERE a.student_id = ? ORDER BY a.updated_at DESC, a.id DESC LIMIT 1');
+    $stmt->execute([$userId]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    if (!$row || !is_numeric($row['latitude'] ?? null) || !is_numeric($row['longitude'] ?? null)) {
+        return null;
+    }
+
+    $latitude = (float)$row['latitude'];
+    $longitude = (float)$row['longitude'];
+    $radius = (int)($row['allowed_radius_meters'] ?? 0);
+    if ($latitude < -90 || $latitude > 90 || $longitude < -180 || $longitude > 180 || $radius < 1 || $radius > 10000) {
+        return null;
+    }
+
+    return ['latitude' => $latitude, 'longitude' => $longitude, 'allowed_radius_meters' => $radius];
+}
+
+function calculateDistanceMeters(float $latitude1, float $longitude1, float $latitude2, float $longitude2): float
+{
+    $earthRadius = 6371000.0;
+    $latitude1 = deg2rad($latitude1);
+    $latitude2 = deg2rad($latitude2);
+    $deltaLatitude = $latitude2 - $latitude1;
+    $deltaLongitude = deg2rad($longitude2 - $longitude1);
+    $a = sin($deltaLatitude / 2) ** 2
+        + cos($latitude1) * cos($latitude2) * sin($deltaLongitude / 2) ** 2;
+    $a = min(1.0, max(0.0, $a));
+    return $earthRadius * 2 * atan2(sqrt($a), sqrt(1 - $a));
+}
+
+function validateAttendanceLocation(PDO $pdo, int $userId, array $payload): array
+{
+    $studentCoordinates = parseCoordinatePair($payload, 'GPS', true);
+    $companyCoordinates = getAssignedCompanyCoordinates($pdo, $userId);
+    if ($companyCoordinates === null) {
+        sendError('The assigned company location is not configured. Contact your coordinator before recording attendance.', 409);
+    }
+
+    $distanceMeters = calculateDistanceMeters(
+        $studentCoordinates['latitude'],
+        $studentCoordinates['longitude'],
+        $companyCoordinates['latitude'],
+        $companyCoordinates['longitude']
+    );
+    $allowedRadius = $companyCoordinates['allowed_radius_meters'];
+    if ($distanceMeters > $allowedRadius) {
+        sendError(
+            'You are outside your OJT location. You are ' . (int)round($distanceMeters) . ' meters away. Allowed distance: ' . $allowedRadius . ' meters.',
+            403
+        );
+    }
+
+    return [
+        'latitude' => $studentCoordinates['latitude'],
+        'longitude' => $studentCoordinates['longitude'],
+        'accuracy' => isset($payload['accuracy']) && is_numeric($payload['accuracy']) ? (float)$payload['accuracy'] : null,
+        'distance_meters' => $distanceMeters,
+        'allowed_radius_meters' => $allowedRadius,
+    ];
+}
+
+function calculateAttendancePairSeconds(?string $start, ?string $end): ?int
+{
+    if (!$start || !$end) {
+        return null;
+    }
+    $startTimestamp = strtotime($start);
+    $endTimestamp = strtotime($end);
+    if ($startTimestamp === false || $endTimestamp === false || $endTimestamp < $startTimestamp) {
+        return null;
+    }
+    return $endTimestamp - $startTimestamp;
+}
+
+function calculateAttendancePairMinutes(?string $start, ?string $end): ?int
+{
+    $seconds = calculateAttendancePairSeconds($start, $end);
+    return $seconds === null ? null : (int)round($seconds / 60);
+}
+
+function enrichAttendanceRows(array $rows): array
+{
+    foreach ($rows as &$row) {
+        $morningSeconds = calculateAttendancePairSeconds($row['time_in'] ?? null, $row['time_out'] ?? null);
+        $afternoonSeconds = calculateAttendancePairSeconds($row['afternoon_time_in'] ?? null, $row['afternoon_time_out'] ?? null);
+        $totalSeconds = ($morningSeconds ?? 0) + ($afternoonSeconds ?? 0);
+        $row['morning_seconds'] = $morningSeconds;
+        $row['afternoon_seconds'] = $afternoonSeconds;
+        $row['total_seconds'] = $totalSeconds;
+        $row['morning_minutes'] = $morningSeconds === null ? null : (int)round($morningSeconds / 60);
+        $row['afternoon_minutes'] = $afternoonSeconds === null ? null : (int)round($afternoonSeconds / 60);
+        $row['total_minutes'] = (int)round($totalSeconds / 60);
+        $row['duration_minutes'] = $row['total_minutes'];
+    }
+    unset($row);
+    return $rows;
+}
+
 function requireSession(): array
 {
-    if (session_status() === PHP_SESSION_NONE) {
-        session_start();
-    }
-    if (empty($_SESSION['user'])) {
+    $user = getSessionUser();
+    if (empty($user)) {
         sendError('Unauthorized. Please log in.', 401);
     }
-    return $_SESSION['user'];
+    return $user;
 }
 
 function requireRole(array $user, array $allowedRoles): void
@@ -108,7 +238,7 @@ function getCompanySupervisorId(PDO $pdo, ?int $companyId): ?int
     return $supervisorId ? (int)$supervisorId : null;
 }
 
-function createAttendanceSupervisorNotification(PDO $pdo, int $studentId, int $attendanceId): void
+function createAttendanceSupervisorNotification(PDO $pdo, int $studentId, int $attendanceId, string $eventType): void
 {
     $assignmentStmt = $pdo->prepare('SELECT a.company_id, a.supervisor_id, c.name AS company_name FROM assignments a LEFT JOIN companies c ON c.id = a.company_id WHERE a.student_id = ? ORDER BY a.updated_at DESC, a.id DESC LIMIT 1');
     $assignmentStmt->execute([$studentId]);
@@ -124,7 +254,23 @@ function createAttendanceSupervisorNotification(PDO $pdo, int $studentId, int $a
         return;
     }
 
-    $attendanceStmt = $pdo->prepare('SELECT student_id, log_date, time_in FROM attendance_logs WHERE id = ? LIMIT 1');
+    $eventTimeColumns = [
+        'morning_time_in' => 'time_in',
+        'morning_time_out' => 'time_out',
+        'afternoon_time_in' => 'afternoon_time_in',
+        'afternoon_time_out' => 'afternoon_time_out',
+    ];
+    $eventLabels = [
+        'morning_time_in' => 'Morning Time In',
+        'morning_time_out' => 'Morning Time Out',
+        'afternoon_time_in' => 'Afternoon Time In',
+        'afternoon_time_out' => 'Afternoon Time Out',
+    ];
+    if (!isset($eventTimeColumns[$eventType], $eventLabels[$eventType])) {
+        return;
+    }
+    $timeColumn = $eventTimeColumns[$eventType];
+    $attendanceStmt = $pdo->prepare("SELECT student_id, log_date, `$timeColumn` AS event_time FROM attendance_logs WHERE id = ? LIMIT 1");
     $attendanceStmt->execute([$attendanceId]);
     $attendance = $attendanceStmt->fetch(PDO::FETCH_ASSOC);
     if (!$attendance) {
@@ -136,13 +282,13 @@ function createAttendanceSupervisorNotification(PDO $pdo, int $studentId, int $a
     $studentName = (string)($studentNameStmt->fetchColumn() ?: 'Student');
 
     $attendanceDate = !empty($attendance['log_date']) ? date('F j, Y', strtotime($attendance['log_date'])) : '';
-    $attendanceTime = !empty($attendance['time_in']) ? date('g:i A', strtotime($attendance['time_in'])) : '';
+    $attendanceTime = !empty($attendance['event_time']) ? date('g:i A', strtotime($attendance['event_time'])) : '';
     $message = $attendanceDate !== '' && $attendanceTime !== ''
-        ? $studentName . ' marked her attendance on ' . $attendanceDate . ' at ' . $attendanceTime . '.'
-        : ($attendanceTime !== '' ? $studentName . ' marked her attendance at ' . $attendanceTime . '.' : $studentName . ' marked her attendance.');
+        ? $studentName . ' recorded ' . $eventLabels[$eventType] . ' on ' . $attendanceDate . ' at ' . $attendanceTime . '.'
+        : ($attendanceTime !== '' ? $studentName . ' recorded ' . $eventLabels[$eventType] . ' at ' . $attendanceTime . '.' : $studentName . ' recorded ' . $eventLabels[$eventType] . '.');
 
-    $duplicateStmt = $pdo->prepare('SELECT id FROM notifications WHERE user_id = ? AND notification_type = "attendance" AND attendance_id = ? LIMIT 1');
-    $duplicateStmt->execute([$resolvedSupervisorId, $attendanceId]);
+    $duplicateStmt = $pdo->prepare('SELECT id FROM notifications WHERE user_id = ? AND notification_type = "attendance" AND attendance_id = ? AND message = ? LIMIT 1');
+    $duplicateStmt->execute([$resolvedSupervisorId, $attendanceId, $message]);
     if ($duplicateStmt->fetchColumn()) {
         return;
     }
@@ -409,16 +555,24 @@ if ($resource === 'companies') {
         $name = trim($body['name'] ?? '');
         $address = trim($body['address'] ?? $body['location'] ?? '');
         $location = trim($body['location'] ?? $address);
-        $contactPerson = trim($body['contact_person'] ?? '');
+        $contactPerson = trim($body['contact_person'] ?? $body['name'] ?? '');
         $contactEmail = trim($body['contact_email'] ?? '');
         $contactPhone = trim($body['contact_phone'] ?? '');
+        $coordinates = parseCoordinatePair($body, 'Company');
+        $allowedRadius = parseAllowedRadiusMeters($body);
         $status = trim($body['status'] ?? 'Active');
-        if (!$name || !$address || !$contactPerson || !$contactPhone) sendError('Company name, address, contact person, and contact number are required.');
+        if (!in_array($status, ['Active', 'Inactive'], true)) {
+            sendError('Company status must be Active or Inactive.');
+        }
+        if (!$name || (!$address && !$location)) sendError('Company name and address/location are required.');
+        if ($contactPerson === '') {
+            $contactPerson = $name;
+        }
         $check = $pdo->prepare('SELECT 1 FROM companies WHERE name=? LIMIT 1');
         $check->execute([$name]);
         if ($check->fetchColumn()) sendError('Company name already exists.', 409);
-        $stmt = $pdo->prepare('INSERT INTO companies (name, location, contact_person, address, contact_email, contact_phone, status) VALUES (?,?,?,?,?,?,?)');
-        $stmt->execute([$name, $location ?: $address, $contactPerson, $address, $contactEmail, $contactPhone, $status]);
+        $stmt = $pdo->prepare('INSERT INTO companies (name, location, contact_person, address, contact_email, contact_phone, latitude, longitude, allowed_radius_meters, status) VALUES (?,?,?,?,?,?,?,?,?,?)');
+        $stmt->execute([$name, $location ?: $address, $contactPerson, $address, $contactEmail, $contactPhone, $coordinates['latitude'] ?? null, $coordinates['longitude'] ?? null, $allowedRadius, $status]);
         $companyId = (int)$pdo->lastInsertId();
         if ($status === 'Active' && $user['role'] === 'admin') {
             try {
@@ -437,7 +591,13 @@ if ($resource === 'companies') {
         $address = trim($body['address'] ?? $body['location'] ?? '');
         $location = trim($body['location'] ?? $address);
         $contactPerson = trim($body['contact_person'] ?? '');
-        $stmt = $pdo->prepare('UPDATE companies SET name=?, location=?, contact_person=?, address=?, contact_email=?, contact_phone=?, status=? WHERE id=?');
+        $coordinates = parseCoordinatePair($body, 'Company');
+        $allowedRadius = parseAllowedRadiusMeters($body);
+        $status = trim($body['status'] ?? 'Active');
+        if (!in_array($status, ['Active', 'Inactive'], true)) {
+            sendError('Company status must be Active or Inactive.');
+        }
+        $stmt = $pdo->prepare('UPDATE companies SET name=?, location=?, contact_person=?, address=?, contact_email=?, contact_phone=?, latitude=?, longitude=?, allowed_radius_meters=?, status=? WHERE id=?');
         $stmt->execute([
             trim($body['name'] ?? ''),
             $location ?: $address,
@@ -445,7 +605,10 @@ if ($resource === 'companies') {
             $address,
             trim($body['contact_email'] ?? ''),
             trim($body['contact_phone'] ?? ''),
-            trim($body['status'] ?? 'Active'),
+            $coordinates['latitude'] ?? null,
+            $coordinates['longitude'] ?? null,
+            $allowedRadius,
+            $status,
             $id,
         ]);
         logActivity($pdo, (int)$user['id'], 'Update Company', 'Updated company ' . trim($body['name'] ?? '') . '.');
@@ -472,7 +635,7 @@ if ($resource === 'admin_report') {
     if ($method === 'GET') {
         $stmt = $pdo->query(
             'SELECT u.id, u.student_id AS student_no, u.name AS student_name,
-                    COALESCE(p.name, p.code, u.program) AS program,
+                    COALESCE(p.code, p.name, u.program) AS program,
                     c.name AS company_name,
                     co.name AS coordinator_name,
                     company_sup.name AS supervisor_name,
@@ -482,7 +645,13 @@ if ($resource === 'admin_report') {
              LEFT JOIN programs p ON p.id = u.program_id
              LEFT JOIN assignments a ON a.student_id = u.id
              LEFT JOIN companies c ON c.id = a.company_id
-             LEFT JOIN users co ON co.id = a.coordinator_id
+             LEFT JOIN (
+                 SELECT program_id, MIN(id) AS coordinator_id
+                 FROM users
+                 WHERE role = "coordinator" AND status = "Active" AND program_id IS NOT NULL
+                 GROUP BY program_id
+             ) program_coordinator ON program_coordinator.program_id = u.program_id
+             LEFT JOIN users co ON co.id = program_coordinator.coordinator_id
              LEFT JOIN users company_sup ON company_sup.id = (
                  SELECT assigned_sup.id FROM users assigned_sup
                  WHERE assigned_sup.role = "supervisor"
@@ -547,15 +716,14 @@ if ($resource === 'company_assignment') {
                         COALESCE(p.code, p.name, u.program) AS program,
                         a.id AS assignment_id, a.company_id, a.internship_status AS assignment_status,
                         c.name AS company_name
-                  FROM assignments a
-                 JOIN users u ON u.id = a.student_id AND u.role = "student" AND u.status = "Active"
-                  JOIN coordinator_company cc ON cc.coordinator_id = ? AND cc.company_id = a.company_id
+                                    FROM users u
+                                    LEFT JOIN assignments a ON a.student_id = u.id
                  LEFT JOIN programs p ON p.id = u.program_id
                  LEFT JOIN companies c ON c.id = a.company_id
-                  WHERE a.company_id IS NOT NULL AND u.program_id = ?
+                                    WHERE u.role = "student" AND u.status = "Active" AND u.program_id = ?
                  ORDER BY u.name ASC';
             $studentStmt = $pdo->prepare($studentSql);
-              $studentStmt->execute([$coordinatorId, $programId]);
+                            $studentStmt->execute([$programId]);
             $students = $studentStmt->fetchAll();
 
               send(['success' => true, 'companies' => $companies, 'students' => $students, 'company_id' => getCoordinatorCompanyId($pdo, $user), 'company_ids' => $assignedCompanyIds, 'program_id' => $programId]);
@@ -627,16 +795,31 @@ if ($resource === 'company_assignment') {
             sendError('Student is outside your assigned program.', 403);
         }
 
-        $existingStmt = $pdo->prepare('SELECT id FROM assignments WHERE student_id=? AND company_id IS NOT NULL LIMIT 1');
+        $existingStmt = $pdo->prepare('SELECT id, company_id FROM assignments WHERE student_id=? LIMIT 1');
         $existingStmt->execute([$studentId]);
-        $existing = $existingStmt->fetchColumn();
-        if ($existing) {
+        $existing = $existingStmt->fetch(PDO::FETCH_ASSOC);
+        if ($existing && !empty($existing['company_id'])) {
             sendError('This student is already assigned to a company and cannot be assigned again.', 409);
         }
-        $stmt = $pdo->prepare('INSERT INTO assignments (student_id, company_id, supervisor_id, coordinator_id, program_code, internship_status, hours_required, remarks) VALUES (?,?,?,?,?,?,?,?)');
-        $stmt->execute([$studentId, $companyId, $supervisorId, $user['id'], $student['program'] ?? '', 'Pending', 500, $remarks]);
+        if ($existing) {
+            $stmt = $pdo->prepare(
+                'UPDATE assignments
+                 SET company_id=?, supervisor_id=?, coordinator_id=?, program_code=?,
+                     remarks=CASE WHEN ? <> "" THEN ? ELSE remarks END, updated_at=NOW()
+                 WHERE id=? AND company_id IS NULL'
+            );
+            $stmt->execute([$companyId, $supervisorId, $user['id'], $student['program'] ?? '', $remarks, $remarks, (int)$existing['id']]);
+            if ($stmt->rowCount() !== 1) {
+                sendError('This student was assigned to a company by another request. Refresh and try again.', 409);
+            }
+            $assignmentId = (int)$existing['id'];
+        } else {
+            $stmt = $pdo->prepare('INSERT INTO assignments (student_id, company_id, supervisor_id, coordinator_id, program_code, internship_status, hours_required, remarks) VALUES (?,?,?,?,?,?,?,?)');
+            $stmt->execute([$studentId, $companyId, $supervisorId, $user['id'], $student['program'] ?? '', 'Pending', 500, $remarks]);
+            $assignmentId = (int)$pdo->lastInsertId();
+        }
         logActivity($pdo, (int)$user['id'], 'Assign Student', 'Assigned ' . $student['name'] . ' to ' . $company['name'] . '.');
-        send(['success' => true, 'message' => 'Student assigned.', 'id' => (int)$pdo->lastInsertId()]);
+        send(['success' => true, 'message' => 'Student assigned.', 'id' => $assignmentId]);
     }
 }
 
@@ -653,6 +836,7 @@ if ($resource === 'assignments') {
                         company_sup.name AS supervisor_name, co.name AS coordinator_name,
                         sy.year_label, sy.semester
                  FROM assignments a
+                  JOIN users u ON u.id = a.student_id
                  LEFT JOIN companies c ON a.company_id = c.id
                  LEFT JOIN users company_sup ON company_sup.id = (
                      SELECT assigned_sup.id FROM users assigned_sup
@@ -661,7 +845,13 @@ if ($resource === 'assignments') {
                          AND assigned_sup.company_id = a.company_id
                      ORDER BY assigned_sup.id ASC LIMIT 1
                  )
-                 LEFT JOIN users co ON a.coordinator_id = co.id
+                  LEFT JOIN (
+                      SELECT program_id, MIN(id) AS coordinator_id
+                      FROM users
+                      WHERE role = "coordinator" AND status = "Active" AND program_id IS NOT NULL
+                      GROUP BY program_id
+                  ) program_coordinator ON program_coordinator.program_id = u.program_id
+                  LEFT JOIN users co ON co.id = program_coordinator.coordinator_id
                  LEFT JOIN school_years sy ON a.school_year_id = sy.id
                  WHERE a.student_id = ? LIMIT 1'
             );
@@ -688,7 +878,13 @@ if ($resource === 'assignments') {
                          AND assigned_sup.company_id = a.company_id
                      ORDER BY assigned_sup.id ASC LIMIT 1
                  )
-                 LEFT JOIN users co ON co.id = a.coordinator_id
+                 LEFT JOIN (
+                     SELECT program_id, MIN(id) AS coordinator_id
+                     FROM users
+                     WHERE role = "coordinator" AND status = "Active" AND program_id IS NOT NULL
+                     GROUP BY program_id
+                 ) program_coordinator ON program_coordinator.program_id = u.program_id
+                 LEFT JOIN users co ON co.id = program_coordinator.coordinator_id
                  LEFT JOIN school_years sy ON a.school_year_id = sy.id
                  JOIN users supervisor ON supervisor.id = ?
                     AND supervisor.role = "supervisor"
@@ -747,7 +943,13 @@ if ($resource === 'assignments') {
                          AND assigned_sup.company_id = a.company_id
                      ORDER BY assigned_sup.id ASC LIMIT 1
                  )
-                 LEFT JOIN users co ON a.coordinator_id = co.id
+                 LEFT JOIN (
+                     SELECT program_id, MIN(id) AS coordinator_id
+                     FROM users
+                     WHERE role = "coordinator" AND status = "Active" AND program_id IS NOT NULL
+                     GROUP BY program_id
+                 ) program_coordinator ON program_coordinator.program_id = u.program_id
+                 LEFT JOIN users co ON co.id = program_coordinator.coordinator_id
                  LEFT JOIN school_years sy ON a.school_year_id = sy.id
                  ORDER BY a.assigned_at DESC'
             );
@@ -858,7 +1060,7 @@ if ($resource === 'attendance') {
         if ($user['role'] === 'student') {
             $stmt = $pdo->prepare('SELECT * FROM attendance_logs WHERE student_id=? ORDER BY log_date DESC LIMIT 60');
             $stmt->execute([$userId]);
-            send(['success' => true, 'attendance' => $stmt->fetchAll()]);
+            send(['success' => true, 'attendance' => enrichAttendanceRows($stmt->fetchAll())]);
         } elseif ($user['role'] === 'supervisor') {
             $stmt = $pdo->prepare(
                 'SELECT al.*, u.name AS student_name, c.name AS company_name FROM attendance_logs al
@@ -873,7 +1075,7 @@ if ($resource === 'attendance') {
                  ORDER BY al.log_date DESC, al.student_id ASC LIMIT 300'
             );
             $stmt->execute([$userId]);
-            send(['success' => true, 'attendance' => $stmt->fetchAll()]);
+            send(['success' => true, 'attendance' => enrichAttendanceRows($stmt->fetchAll())]);
         } elseif ($user['role'] === 'coordinator') {
             try {
                 $programId = getCoordinatorProgramId($pdo, $user);
@@ -894,7 +1096,7 @@ if ($resource === 'attendance') {
                      ORDER BY al.log_date DESC, u.name ASC LIMIT 500'
                 );
                 $stmt->execute([$programId]);
-                send(['success' => true, 'attendance' => $stmt->fetchAll()]);
+                send(['success' => true, 'attendance' => enrichAttendanceRows($stmt->fetchAll())]);
             } catch (Throwable $e) {
                 error_log('[attendance][coordinator] Query failed for coordinator #' . $userId . ': ' . $e->getMessage());
                 sendError('Unable to load coordinator attendance records. Check the server log for the database error.', 500);
@@ -908,75 +1110,170 @@ if ($resource === 'attendance') {
                  LEFT JOIN companies c ON a.company_id = c.id
                  ORDER BY al.log_date DESC LIMIT 500'
             );
-            send(['success' => true, 'attendance' => $stmt->fetchAll()]);
+            send(['success' => true, 'attendance' => enrichAttendanceRows($stmt->fetchAll())]);
         }
     }
 
     if ($method === 'POST') {
         requireRole($user, ['student']);
         $action = trim($body['action'] ?? '');
+        if ($action === 'validate_location') {
+            $location = validateAttendanceLocation($pdo, $userId, $body);
+            send([
+                'success' => true,
+                'message' => 'Location verified.',
+                'distance_meters' => round($location['distance_meters'], 2),
+                'allowed_radius_meters' => $location['allowed_radius_meters'],
+            ]);
+        }
+        $legacyActions = ['time_in' => 'morning_time_in', 'time_out' => 'morning_time_out'];
+        $eventType = $legacyActions[$action] ?? $action;
+        $eventColumns = [
+            'morning_time_in' => ['time_in', 'face_snapshot_in', 'time_in_latitude', 'time_in_longitude', 'time_in_accuracy', 'time_in_address', 'time_in_distance', 'time_in_distance_meters', 'time_in_location_status', 'verification_status'],
+            'morning_time_out' => ['time_out', 'face_snapshot_out', 'time_out_latitude', 'time_out_longitude', 'time_out_accuracy', 'time_out_address', 'time_out_distance', 'time_out_distance_meters', 'time_out_location_status', 'time_out_verification_status'],
+            'afternoon_time_in' => ['afternoon_time_in', 'afternoon_face_snapshot_in', 'afternoon_time_in_latitude', 'afternoon_time_in_longitude', 'afternoon_time_in_accuracy', 'afternoon_time_in_address', 'afternoon_time_in_distance', 'afternoon_time_in_distance_meters', 'afternoon_time_in_location_status', 'afternoon_time_in_verification_status'],
+            'afternoon_time_out' => ['afternoon_time_out', 'afternoon_face_snapshot_out', 'afternoon_time_out_latitude', 'afternoon_time_out_longitude', 'afternoon_time_out_accuracy', 'afternoon_time_out_address', 'afternoon_time_out_distance', 'afternoon_time_out_distance_meters', 'afternoon_time_out_location_status', 'afternoon_time_out_verification_status'],
+        ];
+        $eventLabels = [
+            'morning_time_in' => 'Morning Time In',
+            'morning_time_out' => 'Morning Time Out',
+            'afternoon_time_in' => 'Afternoon Time In',
+            'afternoon_time_out' => 'Afternoon Time Out',
+        ];
+        if (!isset($eventColumns[$eventType])) {
+            sendError('Invalid attendance event.', 400);
+        }
+
+        $location = validateAttendanceLocation($pdo, $userId, $body);
         $faceEncoding = trim($body['face_encoding'] ?? '');
         verifyStudentFace($pdo, $userId, $faceEncoding);
+        $faceSnapshot = trim($body['face_snapshot'] ?? '');
+        if ($faceSnapshot === '') {
+            sendError('A verified face capture is required.', 400);
+        }
+
         $today = date('Y-m-d');
         $now = date('Y-m-d H:i:s');
-        $faceSnapshot = trim($body['face_snapshot'] ?? '');
-
-        // Get student assignment for assignment_id
-        $assignStmt = $pdo->prepare('SELECT id FROM assignments WHERE student_id=? LIMIT 1');
+        $nowTimestamp = strtotime($now);
+        $assignStmt = $pdo->prepare('SELECT id FROM assignments WHERE student_id=? ORDER BY updated_at DESC, id DESC LIMIT 1');
         $assignStmt->execute([$userId]);
-        $assignment = $assignStmt->fetch();
-        $assignmentId = $assignment ? intval($assignment['id']) : null;
+        $assignmentId = (int)($assignStmt->fetchColumn() ?: 0);
+        $sequenceColumns = ['time_in', 'time_out', 'afternoon_time_in', 'afternoon_time_out'];
+        $sequenceEvents = ['morning_time_in', 'morning_time_out', 'afternoon_time_in', 'afternoon_time_out'];
+        $morningSeconds = null;
+        $afternoonSeconds = null;
+        $totalSeconds = 0;
+        $morningMinutes = null;
+        $afternoonMinutes = null;
+        $totalMinutes = 0;
+        $status = 'Present';
 
-        if ($action === 'time_in') {
-            // Check if already timed in today
-            $existing = $pdo->prepare('SELECT id, time_in FROM attendance_logs WHERE student_id=? AND log_date=? LIMIT 1');
-            $existing->execute([$userId, $today]);
-            $row = $existing->fetch();
-            if ($row && $row['time_in']) {
-                sendError('You have already timed in today.');
+        $pdo->beginTransaction();
+        try {
+            $ensureDailyRow = $pdo->prepare(
+                'INSERT INTO attendance_logs (student_id, assignment_id, log_date) VALUES (?,?,?)
+                 ON DUPLICATE KEY UPDATE id=LAST_INSERT_ID(id)'
+            );
+            $ensureDailyRow->execute([$userId, $assignmentId > 0 ? $assignmentId : null, $today]);
+
+            $attendanceStmt = $pdo->prepare('SELECT * FROM attendance_logs WHERE student_id=? AND log_date=? LIMIT 1 FOR UPDATE');
+            $attendanceStmt->execute([$userId, $today]);
+            $row = $attendanceStmt->fetch(PDO::FETCH_ASSOC);
+            if (!$row) {
+                throw new RuntimeException('Unable to lock today attendance row.');
             }
 
-            $lateThreshold = strtotime("$today 08:15:00");
-            $status = (time() > $lateThreshold) ? 'Late' : 'Present';
-
-            if ($row) {
-                $stmt = $pdo->prepare('UPDATE attendance_logs SET time_in=?, face_snapshot_in=?, verification_status=?, status=? WHERE id=?');
-                $stmt->execute([$now, $faceSnapshot, 'Verified', $status, $row['id']]);
-                $attendanceId = (int)$row['id'];
-            } else {
-                $stmt = $pdo->prepare('INSERT INTO attendance_logs (student_id, assignment_id, log_date, time_in, face_snapshot_in, verification_status, status) VALUES (?,?,?,?,?,?,?)');
-                $stmt->execute([$userId, $assignmentId, $today, $now, $faceSnapshot, 'Verified', $status]);
-                $attendanceId = (int)$pdo->lastInsertId();
+            $expectedEvent = null;
+            foreach ($sequenceEvents as $index => $candidateEvent) {
+                if (empty($row[$sequenceColumns[$index]])) {
+                    $expectedEvent = $candidateEvent;
+                    break;
+                }
+            }
+            if ($expectedEvent !== $eventType) {
+                $pdo->rollBack();
+                $message = $expectedEvent === null
+                    ? 'All four attendance events are already recorded for today.'
+                    : 'Record ' . $eventLabels[$expectedEvent] . ' before ' . $eventLabels[$eventType] . '.';
+                sendError($message, 409);
             }
 
-            // Update total hours in assignment
-            $pdo->prepare('UPDATE assignments SET hours_completed = (SELECT COALESCE(SUM(duration_minutes),0) FROM attendance_logs WHERE student_id=?) / 60 WHERE student_id=?')->execute([$userId, $userId]);
-            createAttendanceSupervisorNotification($pdo, $userId, $attendanceId);
+            $eventIndex = array_search($eventType, $sequenceEvents, true);
+            if ($eventIndex > 0) {
+                $previousTimestamp = strtotime((string)$row[$sequenceColumns[$eventIndex - 1]]);
+                if ($previousTimestamp === false || $nowTimestamp === false || $nowTimestamp <= $previousTimestamp) {
+                    $pdo->rollBack();
+                    sendError('Attendance events must be recorded in chronological order.', 409);
+                }
+            }
 
-            logActivity($pdo, $userId, 'Attendance', 'Recorded time-in attendance for ' . $today . '.');
-            send(['success' => true, 'message' => 'Time-in recorded.', 'status' => $status, 'time' => $now]);
+            [$timestampColumn, $snapshotColumn, $latitudeColumn, $longitudeColumn, $accuracyColumn, $addressColumn, $distanceColumn, $distanceMetersColumn, $locationStatusColumn, $verificationColumn] = $eventColumns[$eventType];
+            $row[$timestampColumn] = $now;
+            $morningSeconds = calculateAttendancePairSeconds($row['time_in'] ?? null, $row['time_out'] ?? null);
+            $afternoonSeconds = calculateAttendancePairSeconds($row['afternoon_time_in'] ?? null, $row['afternoon_time_out'] ?? null);
+            $totalSeconds = ($morningSeconds ?? 0) + ($afternoonSeconds ?? 0);
+            $morningMinutes = $morningSeconds === null ? null : (int)round($morningSeconds / 60);
+            $afternoonMinutes = $afternoonSeconds === null ? null : (int)round($afternoonSeconds / 60);
+            $totalMinutes = (int)round($totalSeconds / 60);
+            $status = $row['status'] ?: 'Present';
+            if ($eventType === 'morning_time_in') {
+                $lateThreshold = strtotime($today . ' 08:15:00');
+                $status = $nowTimestamp > $lateThreshold ? 'Late' : 'Present';
+            }
+
+            $updateSql = "UPDATE attendance_logs SET `$timestampColumn`=?, `$snapshotColumn`=?, `$latitudeColumn`=?, `$longitudeColumn`=?, `$accuracyColumn`=?, `$addressColumn`=NULL, `$distanceColumn`=?, `$distanceMetersColumn`=?, `$locationStatusColumn`='Verified', `$verificationColumn`='Verified', duration_minutes=?, status=? WHERE id=?";
+            $updateStmt = $pdo->prepare($updateSql);
+            $updateStmt->execute([
+                $now,
+                $faceSnapshot,
+                $location['latitude'],
+                $location['longitude'],
+                $location['accuracy'],
+                $location['distance_meters'],
+                $location['distance_meters'],
+                $totalMinutes,
+                $status,
+                (int)$row['id'],
+            ]);
+            $pdo->prepare(
+                'UPDATE assignments
+                 SET hours_completed = (
+                     SELECT COALESCE(SUM(
+                        CASE WHEN time_in IS NOT NULL AND time_out IS NOT NULL AND time_out >= time_in
+                            THEN TIMESTAMPDIFF(SECOND, time_in, time_out) ELSE 0 END
+                        + CASE WHEN afternoon_time_in IS NOT NULL AND afternoon_time_out IS NOT NULL AND afternoon_time_out >= afternoon_time_in
+                              THEN TIMESTAMPDIFF(SECOND, afternoon_time_in, afternoon_time_out) ELSE 0 END
+                     ), 0) / 3600.0
+                     FROM attendance_logs WHERE student_id=?
+                 )
+                 WHERE student_id=?'
+            )->execute([$userId, $userId]);
+            $pdo->commit();
+        } catch (Throwable $error) {
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+            error_log('[attendance] Event write failed for student #' . $userId . ': ' . $error->getMessage());
+            sendError('Unable to record this attendance event. Please try again.', 500);
         }
 
-        if ($action === 'time_out') {
-            $existing = $pdo->prepare('SELECT id, time_in FROM attendance_logs WHERE student_id=? AND log_date=? LIMIT 1');
-            $existing->execute([$userId, $today]);
-            $row = $existing->fetch();
-            if (!$row || !$row['time_in']) {
-                sendError('No time-in record found for today.');
-            }
-
-            $timeIn = strtotime($row['time_in']);
-            $durationMinutes = max(0, (int)round((time() - $timeIn) / 60));
-
-            $stmt = $pdo->prepare('UPDATE attendance_logs SET time_out=?, face_snapshot_out=?, verification_status=?, duration_minutes=? WHERE id=?');
-            $stmt->execute([$now, $faceSnapshot, 'Verified', $durationMinutes, $row['id']]);
-
-            // Update total hours
-            $pdo->prepare('UPDATE assignments SET hours_completed = (SELECT COALESCE(SUM(duration_minutes),0) FROM attendance_logs WHERE student_id=? AND time_out IS NOT NULL) / 60 WHERE student_id=?')->execute([$userId, $userId]);
-
-            logActivity($pdo, $userId, 'Attendance', 'Recorded time-out attendance for ' . $today . '.');
-            send(['success' => true, 'message' => 'Time-out recorded.', 'duration_minutes' => $durationMinutes, 'time' => $now]);
-        }
+        createAttendanceSupervisorNotification($pdo, $userId, (int)$row['id'], $eventType);
+        logActivity($pdo, $userId, 'Attendance', 'Recorded ' . $eventLabels[$eventType] . ' for ' . $today . '.');
+        send([
+            'success' => true,
+            'message' => $eventLabels[$eventType] . ' recorded.',
+            'event_type' => $eventType,
+            'status' => $status,
+            'time' => $now,
+            'morning_minutes' => $morningMinutes,
+            'afternoon_minutes' => $afternoonMinutes,
+            'total_minutes' => $totalMinutes,
+            'morning_seconds' => $morningSeconds,
+            'afternoon_seconds' => $afternoonSeconds,
+            'total_seconds' => $totalSeconds,
+            'location_status' => 'Verified',
+            'distance_meters' => round($location['distance_meters'], 2),
+        ]);
     }
 }
 
@@ -1007,18 +1304,18 @@ if ($resource === 'tasks') {
         } elseif ($user['role'] === 'supervisor') {
             $stmt = $pdo->prepare(
                 'SELECT t.*, student.name AS student_name, student.student_id AS student_no,
-                        a.company_id,
-                        COUNT(ts.id) AS submission_count,
-                        SUM(CASE WHEN ts.status IN ("Approved","Rejected") THEN 1 ELSE 0 END) AS reviewed_count
+                       MAX(a.company_id) AS company_id,
+                       COUNT(DISTINCT ts.id) AS submission_count,
+                       COUNT(DISTINCT CASE WHEN ts.status IN ("Approved","Rejected") THEN ts.id END) AS reviewed_count
                  FROM tasks t
-                 JOIN users student ON student.id = t.student_id AND student.role = "student" AND student.status = "Active"
-                 JOIN assignments a ON a.student_id = student.id
                  JOIN users supervisor ON supervisor.id = ?
                     AND supervisor.role = "supervisor"
                     AND supervisor.status = "Active"
-                    AND supervisor.company_id = a.company_id
+                   LEFT JOIN users student ON student.id = t.student_id AND student.role = "student" AND student.status = "Active"
+                   LEFT JOIN assignments a ON a.student_id = student.id AND a.company_id = supervisor.company_id
                  LEFT JOIN task_submissions ts ON ts.task_id = t.id
-                 WHERE t.supervisor_id = supervisor.id
+                   WHERE t.supervisor_id = supervisor.id
+                     AND (t.assignee_type = "all" OR (student.id IS NOT NULL AND a.student_id IS NOT NULL))
                  GROUP BY t.id
                  ORDER BY t.created_at DESC'
             );
@@ -1168,12 +1465,14 @@ if ($resource === 'submissions') {
                 $downloadStmt = $pdo->prepare(
                     'SELECT ts.file_name, ts.file_path
                      FROM task_submissions ts
-                            JOIN tasks t ON t.id = ts.task_id
-                            JOIN users supervisor ON supervisor.id = t.supervisor_id
-                                AND supervisor.id = ?
-                                AND supervisor.role = "supervisor"
-                                AND supervisor.status = "Active"
-                            WHERE ts.id = ? LIMIT 1'
+                     JOIN tasks t ON t.id = ts.task_id
+                     JOIN assignments a ON a.student_id = ts.student_id
+                     JOIN users supervisor ON supervisor.id = ?
+                        AND supervisor.role = "supervisor"
+                        AND supervisor.status = "Active"
+                        AND supervisor.company_id = a.company_id
+                     WHERE ts.id = ? AND t.supervisor_id = supervisor.id
+                     LIMIT 1'
                 );
                 $downloadStmt->execute([(int)$user['id'], $submissionId]);
             }
@@ -1181,24 +1480,16 @@ if ($resource === 'submissions') {
             $download = $downloadStmt->fetch();
             if (!$download || !$uploadRoot) sendError('Submitted file not found.', 404);
 
-            $file = null;
-            if (!empty($download['file_path'])) {
-                $file = realpath(dirname(__DIR__) . '/' . ltrim($download['file_path'], '/\\'));
-            }
-
-            // Older submission rows may have a filename but no stored relative path.
-            if (!$file && !empty($download['file_name'])) {
-                $fileName = basename($download['file_name']);
-                $matches = glob($uploadRoot . DIRECTORY_SEPARATOR . '*_' . $fileName) ?: [];
-                usort($matches, static fn($left, $right) => filemtime($right) <=> filemtime($left));
-                $file = $matches[0] ?? null;
-            }
+            $file = !empty($download['file_path'])
+                ? realpath(dirname(__DIR__) . '/' . ltrim($download['file_path'], '/\\'))
+                : false;
 
             if (!$file || strpos($file, $uploadRoot . DIRECTORY_SEPARATOR) !== 0 || !is_file($file)) {
                 sendError('Submitted file is unavailable.', 404);
             }
             header('Content-Type: ' . (mime_content_type($file) ?: 'application/octet-stream'));
-            header('Content-Disposition: inline; filename="' . basename($download['file_name'] ?: $file) . '"');
+            $downloadName = preg_replace('/[\r\n"]/', '_', basename($download['file_name'] ?: $file));
+            header('Content-Disposition: inline; filename="' . $downloadName . '"');
             header('Content-Length: ' . filesize($file));
             readfile($file);
             exit;
@@ -1219,7 +1510,12 @@ if ($resource === 'submissions') {
                  FROM task_submissions ts
                  JOIN tasks t ON ts.task_id = t.id
                  JOIN users u ON ts.student_id = u.id
-                 WHERE t.supervisor_id = ?
+                      JOIN assignments a ON a.student_id = ts.student_id
+                      JOIN users supervisor ON supervisor.id = ?
+                          AND supervisor.role = "supervisor"
+                          AND supervisor.status = "Active"
+                          AND supervisor.company_id = a.company_id
+                      WHERE t.supervisor_id = supervisor.id
                  ORDER BY ts.submitted_at DESC'
             );
             $stmt->execute([$userId]);
@@ -1320,6 +1616,20 @@ if ($resource === 'submissions') {
         $submission = $submissionStmt->fetch(PDO::FETCH_ASSOC);
         if (!$submission) sendError('Submission not found.', 404);
         if ($user['role'] === 'supervisor' && (int)$submission['supervisor_id'] !== $userId) sendError('You cannot review this submission.', 403);
+        if ($user['role'] === 'supervisor') {
+            $assignmentAccess = $pdo->prepare(
+                'SELECT 1
+                 FROM assignments a
+                 JOIN users supervisor ON supervisor.id = ?
+                    AND supervisor.role = "supervisor"
+                    AND supervisor.status = "Active"
+                    AND supervisor.company_id = a.company_id
+                 WHERE a.student_id = ?
+                 LIMIT 1'
+            );
+            $assignmentAccess->execute([$userId, (int)$submission['student_id']]);
+            if (!$assignmentAccess->fetchColumn()) sendError('You cannot review submissions for students outside your company.', 403);
+        }
         $stmt = $pdo->prepare('UPDATE task_submissions SET status=?, supervisor_comment=?, rejection_reason=?, reviewed_at=NOW(), reviewed_by=? WHERE id=?');
         $stmt->execute([$status, $comment, $status === 'Rejected' ? $comment : null, $userId, $id]);
         $taskStatus = $status === 'Approved' ? 'Completed' : 'Rejected / Needs Revision';
@@ -1521,34 +1831,75 @@ if ($resource === 'profile') {
     }
 
     if ($method === 'POST') {
-        $name = trim($body['name'] ?? '');
-        $email = trim($body['email'] ?? '');
-        $contact = trim($body['contact'] ?? '');
-        $currentPass = trim($body['current_password'] ?? '');
-        $newPass = trim($body['new_password'] ?? '');
-        $confirmPass = trim($body['confirm_password'] ?? '');
+        $nameInput = $body['name'] ?? '';
+        $emailInput = $body['email'] ?? '';
+        $contactInput = $body['contact'] ?? '';
+        $currentPassInput = $body['current_password'] ?? '';
+        $newPassInput = $body['new_password'] ?? '';
+        $confirmPassInput = $body['confirm_password'] ?? '';
+        if (!is_string($nameInput) || !is_string($emailInput) || !is_string($contactInput)
+            || !is_string($currentPassInput) || !is_string($newPassInput) || !is_string($confirmPassInput)) {
+            sendError('Profile fields must be text values.');
+        }
+        $name = trim($nameInput);
+        $email = trim($emailInput);
+        $contact = trim($contactInput);
+        $currentPass = trim($currentPassInput);
+        $newPass = trim($newPassInput);
+        $confirmPass = trim($confirmPassInput);
 
-        if ($name) {
-            $stmt = $pdo->prepare('UPDATE users SET name=?, email=?, contact=? WHERE id=?');
-            $stmt->execute([$name, $email ?: $user['email'], $contact, $userId]);
+        if ($newPass !== '' && ($name !== '' || $email !== '' || $contact !== '')) {
+            sendError('Update profile information and password in separate requests.');
+        }
+
+        if ($name !== '' || $email !== '' || $contact !== '') {
+            $nameLength = function_exists('mb_strlen') ? mb_strlen($name, 'UTF-8') : strlen($name);
+            if ($nameLength < 1 || $nameLength > 120 || strlen($email) > 160 || strlen($contact) > 100
+                || $email === '' || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+                sendError('A name and valid email address are required.');
+            }
+            $account = $pdo->prepare('SELECT id FROM users WHERE id = ? AND role = ? AND status = "Active" LIMIT 1');
+            $account->execute([$userId, $user['role']]);
+            if (!$account->fetch()) sendError('Authenticated user record not found.', 404);
+
+            $duplicate = $pdo->prepare('SELECT id FROM users WHERE email = ? AND id <> ? LIMIT 1');
+            $duplicate->execute([$email, $userId]);
+            if ($duplicate->fetch()) sendError('That email address is already in use.', 409);
+
+            $stmt = $pdo->prepare('UPDATE users SET name = ?, email = ?, contact = ? WHERE id = ? AND role = ? AND status = "Active"');
+            try {
+                $stmt->execute([$name, $email, $contact, $userId, $user['role']]);
+            } catch (PDOException $e) {
+                if ($e->getCode() === '23000') sendError('That email address is already in use.', 409);
+                throw $e;
+            }
+
+            startSessionIfNeeded();
+            if ((int)($_SESSION['user']['id'] ?? 0) === $userId) {
+                $_SESSION['user']['name'] = $name;
+                $_SESSION['user']['email'] = $email;
+                $_SESSION['user']['contact'] = $contact;
+            }
+            session_write_close();
             logActivity($pdo, $userId, 'Update Profile', 'Updated profile information.');
         }
 
-        if ($newPass) {
+        if ($newPass !== '') {
             if ($newPass !== $confirmPass) sendError('New password and confirmation do not match.');
-            if ($userId > 0 && $currentPass) {
-                $check = $pdo->prepare('SELECT password_hash FROM users WHERE id=? LIMIT 1');
-                $check->execute([$userId]);
-                $row = $check->fetch();
-                if (!$row || !password_verify($currentPass, $row['password_hash'])) {
-                    sendError('Current password is incorrect.');
-                }
+            if ($currentPass === '') sendError('Current password is required.');
+            if (strlen($newPass) < 8) sendError('New password must be at least 8 characters long.');
+            $check = $pdo->prepare('SELECT password_hash FROM users WHERE id = ? AND role = ? AND status = "Active" LIMIT 1');
+            $check->execute([$userId, $user['role']]);
+            $row = $check->fetch();
+            if (!$row) sendError('Authenticated user record not found.', 404);
+            if (!password_verify($currentPass, $row['password_hash'])) {
+                sendError('Current password is incorrect.');
             }
-            $pdo->prepare('UPDATE users SET password_hash=? WHERE id=?')->execute([password_hash($newPass, PASSWORD_DEFAULT), $userId]);
+            $pdo->prepare('UPDATE users SET password_hash = ? WHERE id = ? AND role = ? AND status = "Active"')->execute([password_hash($newPass, PASSWORD_DEFAULT), $userId, $user['role']]);
             logActivity($pdo, $userId, 'Update Profile', 'Changed account password.');
         }
 
-        send(['success' => true, 'message' => 'Profile updated.']);
+        send(['success' => true, 'message' => $newPass !== '' ? 'Password updated successfully.' : 'Profile updated successfully.']);
     }
 }
 
@@ -1571,8 +1922,16 @@ if ($resource === 'student_records') {
                        a.assigned_at, a.updated_at, sy.year_label,
                        c.name AS company_name,
                        company_sup.name AS supervisor_name,
+                       CASE
+                           WHEN fr.registration_status = "Registered"
+                                AND attendance_today.time_in IS NOT NULL
+                                AND attendance_today.verification_status = "Verified"
+                                AND attendance_today.time_in_location_status = "Verified"
+                           THEN attendance_today.status
+                           ELSE "Absent"
+                       END AS attendance_status,
                        co.name AS coordinator_name,
-                       fr.status AS face_registration_status
+                       COALESCE(fr.registration_status, "Not Registered") AS face_registration_status
                 FROM users u
                 LEFT JOIN programs p ON p.id = u.program_id
                 LEFT JOIN assignments a ON a.student_id = u.id
@@ -1585,8 +1944,16 @@ if ($resource === 'student_records') {
                                             AND assigned_sup.company_id = a.company_id
                                         ORDER BY assigned_sup.id ASC LIMIT 1
                                 )
-                LEFT JOIN users co ON a.coordinator_id = co.id
                 LEFT JOIN face_registrations fr ON fr.user_id = u.id
+                LEFT JOIN attendance_logs attendance_today ON attendance_today.student_id = u.id
+                    AND attendance_today.log_date = CURRENT_DATE()
+                LEFT JOIN (
+                    SELECT program_id, MIN(id) AS coordinator_id
+                    FROM users
+                    WHERE role = "coordinator" AND status = "Active" AND program_id IS NOT NULL
+                    GROUP BY program_id
+                ) program_coordinator ON program_coordinator.program_id = u.program_id
+                LEFT JOIN users co ON co.id = program_coordinator.coordinator_id
                 WHERE u.role = "student" AND u.status = "Active"';
         $params = [];
         if ($user['role'] === 'coordinator') {
@@ -1618,11 +1985,12 @@ if ($resource === 'student_records') {
 
         $dashboardStmt = $pdo->prepare(
             'SELECT COUNT(DISTINCT u.id) AS total_assigned_students,
-                    COUNT(DISTINCT CASE WHEN a.company_id IS NOT NULL THEN u.id END) AS students_with_company,
+                    COUNT(DISTINCT CASE WHEN c.id IS NOT NULL THEN u.id END) AS students_with_company,
                     COUNT(DISTINCT CASE WHEN a.internship_status = "Ongoing" THEN u.id END) AS ongoing_internships,
                     COUNT(DISTINCT CASE WHEN a.internship_status = "Completed" THEN u.id END) AS completed_internships
              FROM users u
              LEFT JOIN assignments a ON a.student_id = u.id
+             LEFT JOIN companies c ON c.id = a.company_id
              WHERE u.role = "student" AND u.status = "Active" AND u.program_id = ?'
         );
         $dashboardStmt->execute([$programId]);

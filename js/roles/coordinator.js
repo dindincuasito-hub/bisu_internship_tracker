@@ -105,9 +105,9 @@ function formatCoordinatorAttendanceTime(value) {
     : parsed.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
 }
 
-function getCoordinatorAttendanceDuration(timeIn, timeOut, durationMinutes) {
-  if (durationMinutes !== null && durationMinutes !== undefined && durationMinutes !== '') {
-    return `${Number(durationMinutes)} min`;
+function getCoordinatorAttendanceDuration(timeIn, timeOut, durationSeconds) {
+  if (durationSeconds !== null && durationSeconds !== undefined && durationSeconds !== '') {
+    return `${(Number(durationSeconds) / 3600).toFixed(2)} hrs`;
   }
   if (!timeIn || !timeOut) return '—';
   const start = new Date(String(timeIn).replace(' ', 'T'));
@@ -132,7 +132,21 @@ async function loadCoordinatorAttendanceRecords() {
       date: item.log_date || item.date || '',
       timeIn: formatCoordinatorAttendanceTime(item.time_in),
       timeOut: formatCoordinatorAttendanceTime(item.time_out),
-      duration: getCoordinatorAttendanceDuration(item.time_in, item.time_out, item.duration_minutes),
+      afternoonTimeIn: formatCoordinatorAttendanceTime(item.afternoon_time_in),
+      afternoonTimeOut: formatCoordinatorAttendanceTime(item.afternoon_time_out),
+      morningMinutes: item.morning_minutes,
+      afternoonMinutes: item.afternoon_minutes,
+      totalMinutes: item.total_minutes,
+      morningSeconds: item.morning_seconds,
+      afternoonSeconds: item.afternoon_seconds,
+      totalSeconds: item.total_seconds,
+      duration: getCoordinatorAttendanceDuration(item.time_in, item.time_out, item.total_seconds),
+      durationMinutes: item.duration_minutes,
+      remarks: item.remarks || '',
+      morningTimeInVerification: item.verification_status || 'Pending',
+      morningTimeOutVerification: item.time_out_verification_status || 'Pending',
+      afternoonTimeInVerification: item.afternoon_time_in_verification_status || 'Pending',
+      afternoonTimeOutVerification: item.afternoon_time_out_verification_status || 'Pending',
       status: item.status || 'Present'
     }));
     return true;
@@ -162,6 +176,20 @@ function getCoordinatorAttendanceClass(status) {
   return status === 'Present' ? 'tag-green' : status === 'Late' ? 'tag-amber' : 'tag-red';
 }
 
+function formatCoordinatorAttendanceHours(seconds) {
+  return seconds === null || seconds === undefined || seconds === ''
+    ? '—'
+    : (Number(seconds) / 3600).toFixed(2);
+}
+
+function getCoordinatorAttendanceRemarks(item) {
+  if (item.remarks) return item.remarks;
+  const hasTime = value => Boolean(value && value !== '—');
+  return hasTime(item.timeIn) && hasTime(item.timeOut) && hasTime(item.afternoonTimeIn) && hasTime(item.afternoonTimeOut)
+    ? ''
+    : 'Incomplete attendance';
+}
+
 function getCoordinatorRequirementClass(status) {
   return status === 'Approved' ? 'tag-green' : status === 'Needs Review' ? 'tag-amber' : 'tag-red';
 }
@@ -174,7 +202,7 @@ function getCoordinatorSummaryStats() {
   const students = [...studentsById.values()];
   return {
     students,
-    totalAssignedStudents: Number(COORDINATOR_DASHBOARD.total_assigned_students) || students.length,
+    totalAssignedStudents: Number(COORDINATOR_DASHBOARD.total_assigned_students) || 0,
     assignedStudents: Number(COORDINATOR_DASHBOARD.students_with_company) || 0,
     ongoing: Number(COORDINATOR_DASHBOARD.ongoing_internships) || 0,
     completed: Number(COORDINATOR_DASHBOARD.completed_internships) || 0,
@@ -286,7 +314,14 @@ function getCoordinatorAttendanceDisplayStatus(status) {
   const normalized = String(status || '').toLowerCase();
   if (normalized.includes('late')) return 'Late';
   if (normalized.includes('absent')) return 'Absent';
-  return 'Present';
+  if (normalized.includes('present')) return 'Present';
+  if (normalized.includes('excused')) return 'Excused';
+  return 'Absent';
+}
+
+function getCoordinatorAttendanceDisplayClass(status) {
+  const displayStatus = getCoordinatorAttendanceDisplayStatus(status);
+  return displayStatus === 'Excused' ? 'default' : displayStatus.toLowerCase();
 }
 
 function getCoordinatorStudentRecordById(studentId) {
@@ -318,7 +353,7 @@ async function refreshCoordinatorStudentRecords() {
         hours_required: s.hours_required || 500,
         evaluation_score: s.evaluation_score || 0,
         face_registration_status: s.face_registration_status || 'Not Registered',
-        attendance_summary: s.internship_status || 'Pending',
+        attendance_summary: s.attendance_status || 'Absent',
         remarks: s.remarks || '',
         assignment_id: s.assignment_id || null,
         company_id: null,
@@ -370,9 +405,8 @@ function getCoordinatorStudentPageData(page = 1) {
 }
 
 function getCoordinatorStudentRowsMarkup(pageData) {
-  return pageData.rows.length ? pageData.rows.map((student, rowIndex) => `
+  return pageData.rows.length ? pageData.rows.map(student => `
     <tr>
-      <td>${pageData.start + rowIndex + 1}</td>
       <td>${escapeHtml(student.student_id || '—')}</td>
       <td><div class="user-cell"><div class="avatar av-teal">${escapeHtml((student.student_name || '').split(' ').map(word => word[0]).join('').slice(0, 2))}</div><div><div class="user-cell-name">${escapeHtml(student.student_name || 'Unknown')}</div><div class="user-cell-sub">${escapeHtml(student.student_id || '')}</div></div></div></td>
       <td>${escapeHtml(student.program || '—')}</td>
@@ -381,10 +415,8 @@ function getCoordinatorStudentRowsMarkup(pageData) {
       <td>${escapeHtml(student.assigned_supervisor || 'Not Assigned')}</td>
       <td><span class="coordinator-chip coordinator-chip--${getCoordinatorInternshipDisplayStatus(student.internship_status).toLowerCase()}">${escapeHtml(getCoordinatorInternshipDisplayStatus(student.internship_status))}</span></td>
       <td><span class="coordinator-chip coordinator-chip--${getCoordinatorFaceRegistrationDisplayStatus(student.face_registration_status).toLowerCase() === 'registered' ? 'success' : 'default'}">${escapeHtml(getCoordinatorFaceRegistrationDisplayStatus(student.face_registration_status))}</span></td>
-      <td><span class="coordinator-chip coordinator-chip--${getCoordinatorAttendanceDisplayStatus(student.attendance_summary).toLowerCase()}">${escapeHtml(getCoordinatorAttendanceDisplayStatus(student.attendance_summary))}</span></td>
-      <td><div class="coordinator-action-group" style="width:100%;justify-content:center;"><button class="coordinator-action-btn coordinator-action-view" type="button" title="View Student" aria-label="View Student" onclick="viewCoordinatorStudentDetails('${student.student_id || student.id}')"><i class="bi bi-eye-fill coordinator-action-icon"></i></button></div></td>
     </tr>
-  `).join('') : '<tr><td colspan="11" class="text-muted">No students match the current filter.</td></tr>';
+  `).join('') : '<tr><td colspan="8" class="text-muted">No students match the current filter.</td></tr>';
 }
 
 function getCoordinatorStudentPaginationMarkup(containerId, pageData) {
@@ -423,7 +455,6 @@ function getCoordinatorStudentOverviewMarkup(containerId, filter = '', page = 1)
       <table class="coordinator-records-table">
         <thead>
           <tr>
-            <th>#</th>
             <th>Student ID</th>
             <th>Student Name</th>
             <th>Program</th>
@@ -432,8 +463,6 @@ function getCoordinatorStudentOverviewMarkup(containerId, filter = '', page = 1)
             <th>Supervisor</th>
             <th>Internship Status</th>
             <th>Face Registration</th>
-            <th>Attendance</th>
-            <th>Actions</th>
           </tr>
         </thead>
         <tbody data-coordinator-results="${containerId}">${getCoordinatorStudentRowsMarkup(pageData)}</tbody>
@@ -903,22 +932,27 @@ function initCoordinatorAttendanceFilters() {
       return matchesStudent && matchesCompany && matchesDate && matchesStatus;
     });
     container.innerHTML = filtered.length ? `
-      <table>
-        <thead><tr><th>Student</th><th>Company</th><th>Date</th><th>Time In</th><th>Time Out</th><th>Duration</th><th>Status</th></tr></thead>
+      <div class="table-responsive"><table style="min-width:1280px">
+        <thead><tr><th>Student ID</th><th>Student Name</th><th>Company</th><th>Date</th><th>Morning Time In</th><th>Morning Time Out</th><th>Afternoon Time In</th><th>Afternoon Time Out</th><th>Morning Hours</th><th>Afternoon Hours</th><th>Total Daily Hours</th><th>Attendance Remarks</th></tr></thead>
         <tbody>
           ${filtered.map(item => `
             <tr>
+              <td>${escapeHtml(item.studentIdentifier || '—')}</td>
               <td>${escapeHtml(item.name)}</td>
               <td>${escapeHtml(item.company || 'Unassigned')}</td>
               <td>${escapeHtml(item.date)}</td>
               <td>${escapeHtml(item.timeIn)}</td>
               <td>${escapeHtml(item.timeOut)}</td>
-              <td>${escapeHtml(item.duration)}</td>
-              <td><span class="tag ${getCoordinatorAttendanceClass(item.status)}">${escapeHtml(item.status)}</span></td>
+              <td>${escapeHtml(item.afternoonTimeIn)}</td>
+              <td>${escapeHtml(item.afternoonTimeOut)}</td>
+              <td>${formatCoordinatorAttendanceHours(item.morningMinutes)}</td>
+              <td>${formatCoordinatorAttendanceHours(item.afternoonMinutes)}</td>
+              <td>${formatCoordinatorAttendanceHours(item.totalMinutes)}</td>
+              <td>${escapeHtml(getCoordinatorAttendanceRemarks(item))}</td>
             </tr>
           `).join('')}
         </tbody>
-      </table>
+      </table></div>
     ` : '<div class="text-muted" style="padding:24px;text-align:center">No attendance records found.</div>';
   };
   [studentSelect, companySelect, dateInput, statusSelect].forEach(input => input?.addEventListener('change', renderAttendanceRows));
@@ -955,14 +989,18 @@ async function openCoordinatorAttendanceModal(studentId) {
     const body = rows.length ? `
       <div class="table-responsive">
         <table class="table table-sm align-middle">
-          <thead><tr><th>Date</th><th>Time In</th><th>Time Out</th><th>Duration</th><th>Status</th></tr></thead>
+          <thead><tr><th>Date</th><th>Morning In</th><th>Morning Out</th><th>Afternoon In</th><th>Afternoon Out</th><th>Morning Hours</th><th>Afternoon Hours</th><th>Total Hours</th><th>Remarks</th></tr></thead>
           <tbody>${rows.map(item => `
             <tr>
               <td>${escapeHtml(item.log_date || '—')}</td>
-              <td>${escapeHtml(item.time_in || '—')}</td>
-              <td>${escapeHtml(item.time_out || '—')}</td>
-              <td>${item.duration_minutes === null || item.duration_minutes === undefined ? '—' : `${escapeHtml(String(item.duration_minutes))} min`}</td>
-              <td><span class="tag ${getCoordinatorAttendanceClass(item.status)}">${escapeHtml(item.status || 'Present')}</span></td>
+              <td>${escapeHtml(formatAttendanceTime(item.time_in))}</td>
+              <td>${escapeHtml(formatAttendanceTime(item.time_out))}</td>
+              <td>${escapeHtml(formatAttendanceTime(item.afternoon_time_in))}</td>
+              <td>${escapeHtml(formatAttendanceTime(item.afternoon_time_out))}</td>
+              <td>${formatCoordinatorAttendanceHours(item.morning_minutes)}</td>
+              <td>${formatCoordinatorAttendanceHours(item.afternoon_minutes)}</td>
+              <td>${formatCoordinatorAttendanceHours(item.total_minutes)}</td>
+              <td>${escapeHtml(item.remarks || (item.time_in && item.time_out && item.afternoon_time_in && item.afternoon_time_out ? '' : 'Incomplete attendance'))}</td>
             </tr>`).join('')}</tbody>
         </table>
       </div>` : '<div class="text-muted">No attendance records found for this student.</div>';
@@ -992,8 +1030,6 @@ NAV.coordinator = [
 PAGE_RENDERERS.coordinator = {
   dashboard: () => {
     const stats = getCoordinatorSummaryStats();
-    const activities = getCoordinatorDashboardActivities();
-    const statusSummary = getCoordinatorDashboardStatusSummary();
     return `
       <div class="breadcrumb">Coordinator Portal › Dashboard</div>
       <div class="stats-row cols4">
@@ -1001,42 +1037,6 @@ PAGE_RENDERERS.coordinator = {
         <div class="stat-card green"><div class="stat-icon">🏢</div><div class="stat-val">${stats.assignedStudents}</div><div class="stat-label">Students with Company Assignment</div></div>
         <div class="stat-card amber"><div class="stat-icon">⏳</div><div class="stat-val">${stats.ongoing}</div><div class="stat-label">Ongoing Internships</div></div>
         <div class="stat-card teal"><div class="stat-icon">✅</div><div class="stat-val">${stats.completed}</div><div class="stat-label">Completed Internships</div></div>
-      </div>
-      <div class="stats-row cols3 mb-24">
-        <div class="stat-card red"><div class="stat-icon">⚠️</div><div class="stat-val">${stats.pendingRequirements}</div><div class="stat-label">Pending Requirements</div></div>
-        <div class="stat-card blue"><div class="stat-icon">🗓️</div><div class="stat-val">${stats.attendanceToday}</div><div class="stat-label">Attendance Today</div></div>
-        <div class="stat-card gold"><div class="stat-icon">📌</div><div class="stat-val">${activities.length}</div><div class="stat-label">Recent Student Activities</div></div>
-      </div>
-      <div class="two-col">
-        <div class="card">
-          <div class="card-header"><div class="card-title">Recent Student Activities</div></div>
-          <div class="card-body">
-            ${activities.length ? activities.map(item => `
-              <div class="log-item">
-                <div class="avatar av-blue">${escapeHtml(String(item.name || '').split(' ').map(word => word[0]).join('').slice(0, 2))}</div>
-                <div>
-                  <div class="user-cell-name">${escapeHtml(item.name || 'Student')}</div>
-                  <div class="user-cell-sub">${escapeHtml(item.activity || 'Student activity')}</div>
-                </div>
-                <div class="ml-auto text-right">
-                  <div class="user-cell-sub">${escapeHtml(item.date || '')}</div>
-                  <span class="tag tag-blue">Info</span>
-                </div>
-              </div>
-            `).join('') : '<div class="text-muted">No recent student activities.</div>'}
-          </div>
-        </div>
-        <div class="card">
-          <div class="card-header"><div class="card-title">Internship Status Summary</div></div>
-          <div class="card-body">
-            <table>
-              <thead><tr><th>Status</th><th>Total Students</th></tr></thead>
-              <tbody>
-                ${statusSummary.map(item => `<tr><td>${escapeHtml(item.label)}</td><td>${item.count}</td></tr>`).join('')}
-              </tbody>
-            </table>
-          </div>
-        </div>
       </div>
       <div class="card">
         <div class="card-header"><div class="card-title">Assigned Students Overview</div></div>
@@ -1163,11 +1163,327 @@ function csvEscape(value) {
   return `"${String(value || '').replace(/"/g, '""')}"`;
 }
 
+function getCoordinatorAttendanceExportRows(studentName = 'All', monthValue = null, yearValue = null) {
+  const monthIndex = monthValue === null || monthValue === '' ? null : Number(monthValue);
+  const year = yearValue === null || yearValue === '' ? null : Number(yearValue);
+
+  const rows = COORDINATOR_ATTENDANCE_LOG.filter(item => {
+    if (studentName !== 'All' && item.name !== studentName) {
+      return false;
+    }
+
+    const rawDate = item.date || item.log_date || '';
+    if (!rawDate) {
+      return false;
+    }
+
+    const parsedDate = new Date(`${rawDate}T00:00:00`);
+    if (Number.isNaN(parsedDate.getTime())) {
+      return false;
+    }
+
+    if (monthIndex !== null && parsedDate.getMonth() + 1 !== monthIndex) {
+      return false;
+    }
+
+    if (year !== null && parsedDate.getFullYear() !== year) {
+      return false;
+    }
+
+    return true;
+  });
+
+  return rows.sort((a, b) => new Date(`${a.date || a.log_date}T00:00:00`) - new Date(`${b.date || b.log_date}T00:00:00`));
+}
+
+function getCoordinatorAttendanceDurationMinutes(row) {
+  if (typeof row.totalMinutes === 'number' && Number.isFinite(row.totalMinutes)) {
+    return row.totalMinutes;
+  }
+  if (typeof row.durationMinutes === 'number' && Number.isFinite(row.durationMinutes)) {
+    return row.durationMinutes;
+  }
+
+  if (Number.isFinite(Number(row.duration_minutes))) {
+    return Number(row.duration_minutes);
+  }
+
+  const durationText = String(row.duration || '').toLowerCase();
+  const matchMinutes = durationText.match(/(\d+(?:\.\d+)?)\s*min/);
+  if (matchMinutes) {
+    return Math.round(Number(matchMinutes[1]));
+  }
+
+  const matchHours = durationText.match(/(\d+(?:\.\d+)?)\s*hrs?/);
+  if (matchHours) {
+    return Math.round(Number(matchHours[1]) * 60);
+  }
+
+  if (row.timeIn && row.timeOut) {
+    const start = new Date(`${row.date || row.log_date}T${String(row.timeIn).split(' ')[1] || row.timeIn}`);
+    const end = new Date(`${row.date || row.log_date}T${String(row.timeOut).split(' ')[1] || row.timeOut}`);
+    if (!Number.isNaN(start.getTime()) && !Number.isNaN(end.getTime())) {
+      return Math.max(0, Math.round((end - start) / 60000));
+    }
+  }
+
+  return 0;
+}
+
+function getCoordinatorAttendanceDurationSeconds(row) {
+  if (typeof row.totalSeconds === 'number' && Number.isFinite(row.totalSeconds)) {
+    return row.totalSeconds;
+  }
+  return getCoordinatorAttendanceDurationMinutes(row) * 60;
+}
+
+function getCoordinatorDtrMarkup(studentName, monthValue, yearValue, rows) {
+  const monthLabel = new Date(Number(yearValue), Number(monthValue) - 1, 1).toLocaleString('en-US', { month: 'long' });
+  const student = COORDINATOR_LIVE_STUDENT_RECORDS.find(item => (item.name || item.student_name) === studentName)
+    || COORDINATOR_LIVE_STUDENT_RECORDS.find(item => (item.student_id || item.id) === studentName)
+    || { name: studentName, student_id: '', program: 'N/A', assigned_company: 'N/A', assigned_supervisor: 'N/A', section: '' };
+
+  const companyName = student.assigned_company || student.company || 'N/A';
+  const supervisorName = student.assigned_supervisor || student.supervisor || 'N/A';
+  const totalSeconds = rows.reduce((total, item) => total + getCoordinatorAttendanceDurationSeconds(item), 0);
+  const totalHours = (totalSeconds / 3600).toFixed(2);
+
+  const tableRows = rows.length ? rows.map((item, index) => {
+    const dateLabel = item.date || item.log_date || '—';
+    const morningSeconds = item.morningSeconds;
+    const afternoonSeconds = item.afternoonSeconds;
+    const totalEventSeconds = getCoordinatorAttendanceDurationSeconds(item);
+    const morningHours = morningSeconds === null || morningSeconds === undefined ? '' : (Number(morningSeconds) / 3600).toFixed(2);
+    const afternoonHours = afternoonSeconds === null || afternoonSeconds === undefined ? '' : (Number(afternoonSeconds) / 3600).toFixed(2);
+    const totalHoursRendered = (totalEventSeconds / 3600).toFixed(2);
+    const remarks = getCoordinatorAttendanceRemarks(item);
+
+    return `
+      <tr>
+        <td>${escapeHtml(dateLabel)}</td>
+        <td>${escapeHtml(item.timeIn === '—' ? '' : item.timeIn || item.time_in || '')}</td>
+        <td>${escapeHtml(item.timeOut === '—' ? '' : item.timeOut || item.time_out || '')}</td>
+        <td>${escapeHtml(item.afternoonTimeIn === '—' ? '' : item.afternoonTimeIn || '')}</td>
+        <td>${escapeHtml(item.afternoonTimeOut === '—' ? '' : item.afternoonTimeOut || '')}</td>
+        <td>${escapeHtml(morningHours)}</td>
+        <td>${escapeHtml(afternoonHours)}</td>
+        <td>${escapeHtml(totalHoursRendered)}</td>
+        <td>${escapeHtml(remarks)}</td>
+      </tr>
+    `;
+  }).join('') : `
+    <tr>
+      <td colspan="9" style="text-align:center; padding: 18px;">No attendance records found for the selected student and month.</td>
+    </tr>
+  `;
+
+  return `<!DOCTYPE html>
+  <html>
+    <head>
+      <meta charset="UTF-8" />
+      <title>Daily Time Record</title>
+      <style>
+        @page { size: A4 portrait; margin: 12mm; }
+        body {
+          margin: 0;
+          padding: 0;
+          font-family: Arial, Helvetica, sans-serif;
+          color: #111;
+          background: #fff;
+        }
+        .dtr-sheet {
+          max-width: 210mm;
+          margin: 0 auto;
+          padding: 6mm;
+          box-sizing: border-box;
+        }
+        .dtr-header {
+          text-align: center;
+          border-bottom: 2px solid #1a1a1a;
+          padding-bottom: 8px;
+          margin-bottom: 12px;
+        }
+        .dtr-institution {
+          font-size: 18px;
+          font-weight: 700;
+          letter-spacing: 0.04em;
+        }
+        .dtr-subtext {
+          font-size: 12px;
+          margin-top: 2px;
+          letter-spacing: 0.05em;
+        }
+        .dtr-title {
+          font-size: 22px;
+          font-weight: 700;
+          text-transform: uppercase;
+          margin: 10px 0 8px;
+        }
+        .dtr-meta {
+          display: grid;
+          grid-template-columns: repeat(4, minmax(140px, 1fr));
+          gap: 8px 14px;
+          font-size: 12px;
+          margin-bottom: 12px;
+        }
+        .dtr-meta div {
+          border-bottom: 1px solid #bfbfbf;
+          padding-bottom: 4px;
+        }
+        .dtr-meta strong {
+          display: inline-block;
+          min-width: 90px;
+        }
+        .dtr-table {
+          width: 100%;
+          border-collapse: collapse;
+          margin-top: 6px;
+          font-size: 9px;
+          table-layout: fixed;
+        }
+        .dtr-table th, .dtr-table td {
+          border: 1px solid #121212;
+          padding: 4px 3px;
+          text-align: center;
+          vertical-align: middle;
+          line-height: 1.25;
+          overflow-wrap: anywhere;
+        }
+        .dtr-table th {
+          background: #f2f2f2;
+          font-weight: 700;
+        }
+        .dtr-summary {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          margin-top: 12px;
+          font-size: 12px;
+          font-weight: 700;
+        }
+        .dtr-signature-wrap {
+          display: grid;
+          grid-template-columns: repeat(3, minmax(140px, 1fr));
+          gap: 20px;
+          margin-top: 22px;
+          font-size: 12px;
+        }
+        .dtr-signature {
+          border-top: 1px solid #111;
+          padding-top: 6px;
+          min-height: 46px;
+          text-align: center;
+        }
+        .dtr-signature-label {
+          display: block;
+          margin-bottom: 4px;
+          font-weight: 700;
+        }
+      </style>
+    </head>
+    <body>
+      <div class="dtr-sheet">
+        <div class="dtr-header">
+          <div class="dtr-institution">BOHOL ISLAND STATE UNIVERSITY - CALAPE CAMPUS</div>
+          <div class="dtr-subtext">COLLEGE OF TECHNOLOGY • OFFICE OF INDUSTRY PARTNERSHIPS</div>
+        </div>
+        <div class="dtr-title">DAILY TIME RECORD</div>
+        <div class="dtr-meta">
+          <div><strong>Name:</strong> ${escapeHtml(student.name || studentName)}</div>
+          <div><strong>Student ID:</strong> ${escapeHtml(student.student_id || student.id || '')}</div>
+          <div><strong>Program:</strong> ${escapeHtml(student.program || 'N/A')}</div>
+          <div><strong>Section:</strong> ${escapeHtml(student.section || 'N/A')}</div>
+          <div><strong>Company:</strong> ${escapeHtml(companyName)}</div>
+          <div><strong>Supervisor:</strong> ${escapeHtml(supervisorName)}</div>
+          <div><strong>Month:</strong> ${escapeHtml(monthLabel)}</div>
+          <div><strong>Year:</strong> ${escapeHtml(String(yearValue))}</div>
+        </div>
+        <table class="dtr-table">
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Morning Time In</th>
+              <th>Morning Time Out</th>
+              <th>Afternoon Time In</th>
+              <th>Afternoon Time Out</th>
+              <th>Morning Hours</th>
+              <th>Afternoon Hours</th>
+              <th>Total Hours</th>
+              <th>Remarks</th>
+            </tr>
+          </thead>
+          <tbody>${tableRows}</tbody>
+        </table>
+        <div class="dtr-summary">
+          <span>Total Hours Rendered: ${escapeHtml(totalHours)} hrs</span>
+          <span>Prepared by: ${escapeHtml(currentUser?.name || 'Coordinator')}</span>
+        </div>
+        <div class="dtr-signature-wrap">
+          <div class="dtr-signature"><span class="dtr-signature-label">Student</span>${escapeHtml(student.name || studentName)}</div>
+          <div class="dtr-signature"><span class="dtr-signature-label">Immediate Supervisor</span>${escapeHtml(supervisorName)}</div>
+          <div class="dtr-signature"><span class="dtr-signature-label">OJT Coordinator</span>${escapeHtml(currentUser?.name || 'Coordinator')}</div>
+        </div>
+      </div>
+    </body>
+  </html>`;
+}
+
 function exportCoordinatorAttendance() {
-  const headers = ['Student','Company','Date','Time In','Time Out','Duration','Status'];
-  const rows = getFilteredCoordinatorAttendanceRows().map(item => [item.name, item.company, item.date, item.timeIn, item.timeOut, item.duration, item.status].map(csvEscape).join(','));
-  downloadCSV([headers.join(','), ...rows].join('\r\n'), 'coordinator_attendance.csv');
-  addNotification('Coordinator attendance exported.', 'success');
+  const studentSelect = document.getElementById('coord-attendance-student');
+  const selectedStudent = studentSelect?.value || 'All';
+  const latestAttendance = COORDINATOR_ATTENDANCE_LOG
+    .filter(item => selectedStudent === 'All' || item.name === selectedStudent)
+    .sort((a, b) => new Date(`${b.date}T00:00:00`) - new Date(`${a.date}T00:00:00`))[0];
+  const latestDate = latestAttendance?.date ? new Date(`${latestAttendance.date}T00:00:00`) : new Date();
+  const defaultMonth = String(Number.isNaN(latestDate.getTime()) ? new Date().getMonth() + 1 : latestDate.getMonth() + 1);
+  const defaultYear = Number.isNaN(latestDate.getTime()) ? new Date().getFullYear() : latestDate.getFullYear();
+
+  const studentOptions = getCoordinatorAttendanceFilterStudents().map(student => `
+    <option value="${escapeHtml(student.name)}" ${student.name === selectedStudent ? 'selected' : ''}>${escapeHtml(student.name)}</option>
+  `).join('');
+
+  const body = `
+    <div class="form-row">
+      <label class="form-label">Student</label>
+      <select class="form-select" id="coord-export-student">${studentOptions || '<option value="All">All Students</option>'}</select>
+    </div>
+    <div class="form-row">
+      <label class="form-label">Month</label>
+      <select class="form-select" id="coord-export-month">
+        ${['January','February','March','April','May','June','July','August','September','October','November','December'].map((monthName, index) => `<option value="${index + 1}" ${String(index + 1) === defaultMonth ? 'selected' : ''}>${monthName}</option>`).join('')}
+      </select>
+    </div>
+    <div class="form-row">
+      <label class="form-label">Year</label>
+      <select class="form-select" id="coord-export-year">
+        ${[defaultYear - 1, defaultYear, defaultYear + 1].map(year => `<option value="${year}" ${year === defaultYear ? 'selected' : ''}>${year}</option>`).join('')}
+      </select>
+    </div>
+  `;
+
+  openGenModal('Export Daily Time Record', body, () => {
+    const chosenStudent = document.getElementById('coord-export-student')?.value || selectedStudent || 'All';
+    const chosenMonth = document.getElementById('coord-export-month')?.value || defaultMonth;
+    const chosenYear = document.getElementById('coord-export-year')?.value || defaultYear;
+    const rows = getCoordinatorAttendanceExportRows(chosenStudent, chosenMonth, chosenYear);
+
+    if (!rows.length) {
+      alert('No attendance records found for the selected student and month.');
+      return false;
+    }
+
+    const printWindow = window.open('', '_blank', 'width=1100,height=900');
+    if (!printWindow) {
+      alert('Please allow pop-ups to print the DTR.');
+      return false;
+    }
+
+    printWindow.document.write(getCoordinatorDtrMarkup(chosenStudent, chosenMonth, chosenYear, rows));
+    printWindow.document.close();
+    setTimeout(() => printWindow.print(), 250);
+    addNotification('Daily Time Record prepared for printing.', 'success');
+    return true;
+  }, 'Generate DTR');
 }
 
 function exportCoordinatorProgress() {
