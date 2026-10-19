@@ -2,13 +2,47 @@
 
 function getDbConfig(): array
 {
-    return [
+    $config = [
         'host' => '127.0.0.1',
         'dbname' => 'bisu_internship_tracker',
         'user' => 'root',
         'pass' => '',
         'charset' => 'utf8mb4',
     ];
+
+    // Keep machine- and host-specific credentials out of version control.
+    // db.local.php is intentionally ignored by Git and may return any or all
+    // of the keys above.
+    $localConfigPath = __DIR__ . '/db.local.php';
+    if (is_file($localConfigPath)) {
+        $localConfig = require $localConfigPath;
+        if (!is_array($localConfig)) {
+            throw new RuntimeException('Database configuration must return an array.');
+        }
+        foreach (array_keys($config) as $key) {
+            if (array_key_exists($key, $localConfig)) {
+                $config[$key] = (string) $localConfig[$key];
+            }
+        }
+    }
+
+    // Environment variables are useful on managed hosting and take priority
+    // over the local configuration file when provided.
+    $environmentKeys = [
+        'host' => 'DB_HOST',
+        'dbname' => 'DB_NAME',
+        'user' => 'DB_USER',
+        'pass' => 'DB_PASS',
+        'charset' => 'DB_CHARSET',
+    ];
+    foreach ($environmentKeys as $key => $environmentKey) {
+        $value = getenv($environmentKey);
+        if ($value !== false && $value !== '') {
+            $config[$key] = $value;
+        }
+    }
+
+    return $config;
 }
 
 function getDbConnection(bool $initializeSchema = true, bool $createMissingDatabase = true): PDO
