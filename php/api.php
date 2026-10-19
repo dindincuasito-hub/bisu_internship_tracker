@@ -1833,34 +1833,38 @@ if ($resource === 'profile') {
     if ($method === 'POST') {
         $nameInput = $body['name'] ?? '';
         $emailInput = $body['email'] ?? '';
-        $contactInput = $body['contact'] ?? '';
+        $contactWasSubmitted = array_key_exists('contact', $body);
+        $contactInput = $contactWasSubmitted ? $body['contact'] : null;
         $currentPassInput = $body['current_password'] ?? '';
         $newPassInput = $body['new_password'] ?? '';
         $confirmPassInput = $body['confirm_password'] ?? '';
-        if (!is_string($nameInput) || !is_string($emailInput) || !is_string($contactInput)
+        if (!is_string($nameInput) || !is_string($emailInput) || ($contactWasSubmitted && !is_string($contactInput))
             || !is_string($currentPassInput) || !is_string($newPassInput) || !is_string($confirmPassInput)) {
             sendError('Profile fields must be text values.');
         }
         $name = trim($nameInput);
         $email = trim($emailInput);
-        $contact = trim($contactInput);
+        $contact = $contactWasSubmitted ? trim($contactInput) : null;
         $currentPass = trim($currentPassInput);
         $newPass = trim($newPassInput);
         $confirmPass = trim($confirmPassInput);
 
-        if ($newPass !== '' && ($name !== '' || $email !== '' || $contact !== '')) {
+        if ($newPass !== '' && ($name !== '' || $email !== '' || $contactWasSubmitted)) {
             sendError('Update profile information and password in separate requests.');
         }
 
-        if ($name !== '' || $email !== '' || $contact !== '') {
+        $savedProfile = null;
+        if ($name !== '' || $email !== '' || $contactWasSubmitted) {
             $nameLength = function_exists('mb_strlen') ? mb_strlen($name, 'UTF-8') : strlen($name);
-            if ($nameLength < 1 || $nameLength > 120 || strlen($email) > 160 || strlen($contact) > 100
+            if ($nameLength < 1 || $nameLength > 120 || strlen($email) > 160 || ($contactWasSubmitted && strlen($contact) > 100)
                 || $email === '' || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
                 sendError('A name and valid email address are required.');
             }
-            $account = $pdo->prepare('SELECT id FROM users WHERE id = ? AND role = ? AND status = "Active" LIMIT 1');
+            $account = $pdo->prepare('SELECT id, contact FROM users WHERE id = ? AND role = ? AND status = "Active" LIMIT 1');
             $account->execute([$userId, $user['role']]);
-            if (!$account->fetch()) sendError('Authenticated user record not found.', 404);
+            $accountRow = $account->fetch();
+            if (!$accountRow) sendError('Authenticated user record not found.', 404);
+            $contact = $contactWasSubmitted ? $contact : $accountRow['contact'];
 
             $duplicate = $pdo->prepare('SELECT id FROM users WHERE email = ? AND id <> ? LIMIT 1');
             $duplicate->execute([$email, $userId]);
@@ -1882,6 +1886,10 @@ if ($resource === 'profile') {
             }
             session_write_close();
             logActivity($pdo, $userId, 'Update Profile', 'Updated profile information.');
+            $refreshedProfile = $pdo->prepare('SELECT id, name, email, contact FROM users WHERE id = ? AND role = ? AND status = "Active" LIMIT 1');
+            $refreshedProfile->execute([$userId, $user['role']]);
+            $savedProfile = $refreshedProfile->fetch();
+            if (!$savedProfile) sendError('Authenticated user record not found.', 404);
         }
 
         if ($newPass !== '') {
@@ -1899,7 +1907,11 @@ if ($resource === 'profile') {
             logActivity($pdo, $userId, 'Update Profile', 'Changed account password.');
         }
 
-        send(['success' => true, 'message' => $newPass !== '' ? 'Password updated successfully.' : 'Profile updated successfully.']);
+        send([
+            'success' => true,
+            'message' => $newPass !== '' ? 'Password updated successfully.' : 'Profile updated successfully.',
+            'profile' => $savedProfile,
+        ]);
     }
 }
 

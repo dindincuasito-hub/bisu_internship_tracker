@@ -180,13 +180,24 @@ async function loadAdminProfile() {
     }
     if (currentRole !== 'admin' || currentPage !== 'profile') return;
 
-    currentUser = { ...currentUser, ...data.profile };
-    document.getElementById('admin-profile-name').value = data.profile.name || '';
-    document.getElementById('admin-profile-email').value = data.profile.email || '';
-    document.getElementById('admin-profile-contact').value = data.profile.contact || '';
+    applyAdminProfile(data.profile);
   } catch (error) {
     setAdminProfileMessage(error.message || 'Unable to load your profile.', true);
   }
+}
+
+function applyAdminProfile(profile) {
+  if (!profile || typeof profile !== 'object') return;
+
+  currentUser = { ...currentUser, ...profile };
+
+  // The admin profile form intentionally exposes only name and email.  Do not
+  // write to fields that are not part of this page; it is rendered dynamically
+  // and may also have been replaced while this request was in flight.
+  const nameInput = document.getElementById('admin-profile-name');
+  const emailInput = document.getElementById('admin-profile-email');
+  if (nameInput) nameInput.value = profile.name || '';
+  if (emailInput) emailInput.value = profile.email || '';
 }
 
 function setAdminProfileMessage(message, isError = false, target = 'admin-profile-message') {
@@ -199,7 +210,6 @@ function setAdminProfileMessage(message, isError = false, target = 'admin-profil
 async function saveAdminProfile() {
   const name = document.getElementById('admin-profile-name')?.value.trim() || '';
   const email = document.getElementById('admin-profile-email')?.value.trim() || '';
-  const contact = currentUser.contact || '';
   if (!name || !email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     setAdminProfileMessage('Enter your name and a valid email address.', true);
     return;
@@ -209,11 +219,11 @@ async function saveAdminProfile() {
     const response = await fetch(`${API_BASE}?resource=profile`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, email, contact })
+      body: JSON.stringify({ name, email })
     });
     const data = await response.json();
     if (!response.ok || !data.success) throw new Error(data.message || 'Unable to save your profile.');
-    currentUser = { ...currentUser, name, email, contact };
+    applyAdminProfile(data.profile || { name, email });
     setAdminProfileMessage(data.message || 'Profile updated successfully.');
   } catch (error) {
     setAdminProfileMessage(error.message || 'Unable to save your profile.', true);
