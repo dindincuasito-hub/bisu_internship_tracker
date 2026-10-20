@@ -91,69 +91,6 @@ function parseAllowedRadiusMeters(array $payload): int
     return (int)$rawRadius;
 }
 
-function getAssignedCompanyCoordinates(PDO $pdo, int $userId): ?array
-{
-    $stmt = $pdo->prepare('SELECT c.latitude, c.longitude, c.allowed_radius_meters FROM assignments a LEFT JOIN companies c ON c.id = a.company_id WHERE a.student_id = ? ORDER BY a.updated_at DESC, a.id DESC LIMIT 1');
-    $stmt->execute([$userId]);
-    $row = $stmt->fetch(PDO::FETCH_ASSOC);
-    if (!$row || !is_numeric($row['latitude'] ?? null) || !is_numeric($row['longitude'] ?? null)) {
-        return null;
-    }
-
-    $latitude = (float)$row['latitude'];
-    $longitude = (float)$row['longitude'];
-    $radius = (int)($row['allowed_radius_meters'] ?? 0);
-    if ($latitude < -90 || $latitude > 90 || $longitude < -180 || $longitude > 180 || $radius < 1 || $radius > 10000) {
-        return null;
-    }
-
-    return ['latitude' => $latitude, 'longitude' => $longitude, 'allowed_radius_meters' => $radius];
-}
-
-function calculateDistanceMeters(float $latitude1, float $longitude1, float $latitude2, float $longitude2): float
-{
-    $earthRadius = 6371000.0;
-    $latitude1 = deg2rad($latitude1);
-    $latitude2 = deg2rad($latitude2);
-    $deltaLatitude = $latitude2 - $latitude1;
-    $deltaLongitude = deg2rad($longitude2 - $longitude1);
-    $a = sin($deltaLatitude / 2) ** 2
-        + cos($latitude1) * cos($latitude2) * sin($deltaLongitude / 2) ** 2;
-    $a = min(1.0, max(0.0, $a));
-    return $earthRadius * 2 * atan2(sqrt($a), sqrt(1 - $a));
-}
-
-function validateAttendanceLocation(PDO $pdo, int $userId, array $payload): array
-{
-    $studentCoordinates = parseCoordinatePair($payload, 'GPS', true);
-    $companyCoordinates = getAssignedCompanyCoordinates($pdo, $userId);
-    if ($companyCoordinates === null) {
-        sendError('The assigned company location is not configured. Contact your coordinator before recording attendance.', 409);
-    }
-
-    $distanceMeters = calculateDistanceMeters(
-        $studentCoordinates['latitude'],
-        $studentCoordinates['longitude'],
-        $companyCoordinates['latitude'],
-        $companyCoordinates['longitude']
-    );
-    $allowedRadius = $companyCoordinates['allowed_radius_meters'];
-    if ($distanceMeters > $allowedRadius) {
-        sendError(
-            'You are outside your OJT location. You are ' . (int)round($distanceMeters) . ' meters away. Allowed distance: ' . $allowedRadius . ' meters.',
-            403
-        );
-    }
-
-    return [
-        'latitude' => $studentCoordinates['latitude'],
-        'longitude' => $studentCoordinates['longitude'],
-        'accuracy' => isset($payload['accuracy']) && is_numeric($payload['accuracy']) ? (float)$payload['accuracy'] : null,
-        'distance_meters' => $distanceMeters,
-        'allowed_radius_meters' => $allowedRadius,
-    ];
-}
-
 function calculateAttendancePairSeconds(?string $start, ?string $end): ?int
 {
     if (!$start || !$end) {
@@ -377,12 +314,11 @@ if (strpos($contentType, 'application/json') !== false) {
 // SCHOOL YEARS
 // =====================================================
 if ($resource === 'school_years') {
+    $user = requireSession();
     if ($method === 'GET') {
         $stmt = $pdo->query('SELECT * FROM school_years ORDER BY id DESC');
         send(['success' => true, 'school_years' => $stmt->fetchAll()]);
     }
-
-    $user = requireSession();
 
     if ($method === 'POST' && ($body['_method'] ?? '') !== 'PUT' && ($body['_method'] ?? '') !== 'DELETE') {
         requireRole($user, ['admin']);
@@ -392,9 +328,19 @@ if ($resource === 'school_years') {
         $endDate = trim($body['end_date'] ?? '');
         $studentsCount = intval($body['students_count'] ?? 0);
         $status = trim($body['status'] ?? 'Active');
-        if (!$yearLabel || !$semester || !$startDate || !$endDate) {
-            sendError('All fields are required.');
+        $yearParts = [];
+        $validYear = preg_match('/^(\d{4})[-–](\d{4})$/u', $yearLabel, $yearParts) === 1
+            && (int)$yearParts[2] === (int)$yearParts[1] + 1;
+        $startTimestamp = strtotime($startDate);
+        $endTimestamp = strtotime($endDate);
+        if (!$validYear || $semester === '' || strlen($semester) > 50 || strlen($startDate) > 50 || strlen($endDate) > 50
+            || $startTimestamp === false || $endTimestamp === false || $endTimestamp <= $startTimestamp || $studentsCount < 0
+            || !in_array($status, ['Active', 'Completed', 'Not Started'], true)) {
+            sendError('Enter a valid consecutive academic year, semester, start/end dates, student count, and status.');
         }
+        $duplicate = $pdo->prepare('SELECT id FROM school_years WHERE year_label = ? AND semester = ? LIMIT 1');
+        $duplicate->execute([$yearLabel, $semester]);
+        if ($duplicate->fetch()) sendError('That academic year and semester already exists.', 409);
         $stmt = $pdo->prepare('INSERT INTO school_years (year_label, semester, start_date, end_date, students_count, status) VALUES (?,?,?,?,?,?)');
         $stmt->execute([$yearLabel, $semester, $startDate, $endDate, $studentsCount, $status]);
         logActivity($pdo, (int)$user['id'], 'Create Academic Year', 'Created academic year ' . $yearLabel . ' (' . $semester . ').');
@@ -405,14 +351,36 @@ if ($resource === 'school_years') {
         requireRole($user, ['admin']);
         $id = intval($body['id'] ?? 0);
         if ($id <= 0) sendError('Invalid ID.');
+        $yearLabel = trim($body['year_label'] ?? '');
+        $semester = trim($body['semester'] ?? '');
+        $startDate = trim($body['start_date'] ?? '');
+        $endDate = trim($body['end_date'] ?? '');
+        $studentsCount = intval($body['students_count'] ?? 0);
+        $status = trim($body['status'] ?? '');
+        $yearParts = [];
+        $validYear = preg_match('/^(\d{4})[-–](\d{4})$/u', $yearLabel, $yearParts) === 1
+            && (int)$yearParts[2] === (int)$yearParts[1] + 1;
+        $startTimestamp = strtotime($startDate);
+        $endTimestamp = strtotime($endDate);
+        if (!$validYear || $semester === '' || strlen($semester) > 50 || strlen($startDate) > 50 || strlen($endDate) > 50
+            || $startTimestamp === false || $endTimestamp === false || $endTimestamp <= $startTimestamp || $studentsCount < 0
+            || !in_array($status, ['Active', 'Completed', 'Not Started'], true)) {
+            sendError('Enter a valid consecutive academic year, semester, start/end dates, student count, and status.');
+        }
+        $exists = $pdo->prepare('SELECT id FROM school_years WHERE id = ? LIMIT 1');
+        $exists->execute([$id]);
+        if (!$exists->fetch()) sendError('Academic year not found.', 404);
+        $duplicate = $pdo->prepare('SELECT id FROM school_years WHERE year_label = ? AND semester = ? AND id <> ? LIMIT 1');
+        $duplicate->execute([$yearLabel, $semester, $id]);
+        if ($duplicate->fetch()) sendError('That academic year and semester already exists.', 409);
         $stmt = $pdo->prepare('UPDATE school_years SET year_label=?, semester=?, start_date=?, end_date=?, students_count=?, status=? WHERE id=?');
         $stmt->execute([
-            trim($body['year_label'] ?? ''),
-            trim($body['semester'] ?? ''),
-            trim($body['start_date'] ?? ''),
-            trim($body['end_date'] ?? ''),
-            intval($body['students_count'] ?? 0),
-            trim($body['status'] ?? 'Active'),
+            $yearLabel,
+            $semester,
+            $startDate,
+            $endDate,
+            $studentsCount,
+            $status,
             $id,
         ]);
         logActivity($pdo, (int)$user['id'], 'Update Academic Year', 'Updated academic year ' . trim($body['year_label'] ?? '') . '.');
@@ -423,6 +391,9 @@ if ($resource === 'school_years') {
         requireRole($user, ['admin']);
         $id = intval($body['id'] ?? $_GET['id'] ?? 0);
         if ($id <= 0) sendError('Invalid ID.');
+        $linked = $pdo->prepare('SELECT COUNT(*) FROM assignments WHERE school_year_id = ?');
+        $linked->execute([$id]);
+        if ((int)$linked->fetchColumn() > 0) sendError('This academic year is linked to internship assignments and cannot be deleted.', 409);
         $stmt = $pdo->prepare('DELETE FROM school_years WHERE id=?');
         $stmt->execute([$id]);
         send(['success' => true, 'message' => 'School year deleted.']);
@@ -433,6 +404,7 @@ if ($resource === 'school_years') {
 // PROGRAMS
 // =====================================================
 if ($resource === 'programs') {
+    $user = requireSession();
     if ($method === 'GET') {
         $stmt = $pdo->query("SELECT p.*, COALESCE(GROUP_CONCAT(DISTINCT u.name ORDER BY u.name SEPARATOR ', '), 'Unassigned') AS coordinator_name
             FROM programs p
@@ -443,8 +415,6 @@ if ($resource === 'programs') {
         send(['success' => true, 'programs' => $rows]);
     }
 
-    $user = requireSession();
-
     if ($method === 'POST' && ($body['_method'] ?? '') !== 'PUT' && ($body['_method'] ?? '') !== 'DELETE') {
         requireRole($user, ['admin']);
         $code = strtoupper(trim($body['code'] ?? ''));
@@ -452,7 +422,7 @@ if ($resource === 'programs') {
         $reqHours = intval($body['req_hours'] ?? 500);
         $studentsCount = intval($body['students_count'] ?? 0);
         $coordinator = 'Unassigned';
-        if (!$code || !$name) sendError('Code and name are required.');
+        if (!$code || !$name || strlen($code) > 20 || strlen($name) > 255 || $reqHours < 0 || $studentsCount < 0) sendError('Valid program code, name, and non-negative counts are required.');
         $nameCheck = $pdo->prepare('SELECT 1 FROM programs WHERE LOWER(name)=LOWER(?) LIMIT 1');
         $nameCheck->execute([$name]);
         if ($nameCheck->fetchColumn()) sendError('Program already exists.', 409);
@@ -472,6 +442,14 @@ if ($resource === 'programs') {
         if ($id <= 0) sendError('Invalid ID.');
         $code = strtoupper(trim($body['code'] ?? ''));
         $name = trim($body['name'] ?? '');
+        $reqHours = intval($body['req_hours'] ?? 500);
+        $studentsCount = intval($body['students_count'] ?? 0);
+        if ($code === '' || $name === '' || strlen($code) > 20 || strlen($name) > 255 || $reqHours < 0 || $studentsCount < 0) {
+            sendError('Valid program code, name, and non-negative counts are required.');
+        }
+        $exists = $pdo->prepare('SELECT id FROM programs WHERE id = ? LIMIT 1');
+        $exists->execute([$id]);
+        if (!$exists->fetch()) sendError('Program not found.', 404);
         $nameCheck = $pdo->prepare('SELECT 1 FROM programs WHERE LOWER(name)=LOWER(?) AND id<>? LIMIT 1');
         $nameCheck->execute([$name, $id]);
         if ($nameCheck->fetchColumn()) sendError('Program already exists.', 409);
@@ -482,8 +460,8 @@ if ($resource === 'programs') {
         $stmt->execute([
             $code,
             $name,
-            intval($body['req_hours'] ?? 500),
-            intval($body['students_count'] ?? 0),
+            $reqHours,
+            $studentsCount,
             $id,
         ]);
         logActivity($pdo, (int)$user['id'], 'Update Program', 'Updated program ' . $code . ' - ' . $name . '.');
@@ -494,6 +472,13 @@ if ($resource === 'programs') {
         requireRole($user, ['admin']);
         $id = intval($body['id'] ?? $_GET['id'] ?? 0);
         if ($id <= 0) sendError('Invalid ID.');
+        $programStmt = $pdo->prepare('SELECT code FROM programs WHERE id = ? LIMIT 1');
+        $programStmt->execute([$id]);
+        $programCode = $programStmt->fetchColumn();
+        if ($programCode === false) sendError('Program not found.', 404);
+        $references = $pdo->prepare('SELECT (SELECT COUNT(*) FROM users WHERE program_id = ?) + (SELECT COUNT(*) FROM users WHERE program = ?) + (SELECT COUNT(*) FROM assignments WHERE program_code = ?)');
+        $references->execute([$id, $programCode, $programCode]);
+        if ((int)$references->fetchColumn() > 0) sendError('This program is assigned to users or internships and cannot be deleted.', 409);
         $pdo->prepare('DELETE FROM programs WHERE id=?')->execute([$id]);
         logActivity($pdo, (int)$user['id'], 'Delete Program', 'Deleted program #' . $id . '.');
         send(['success' => true, 'message' => 'Program deleted.']);
@@ -504,9 +489,10 @@ if ($resource === 'programs') {
 // COMPANIES
 // =====================================================
 if ($resource === 'companies') {
+    $user = requireSession();
     if ($method === 'GET') {
         $search = trim((string)($_GET['search'] ?? ''));
-        $search = mb_substr($search, 0, 200);
+        $search = function_exists('mb_substr') ? mb_substr($search, 0, 200) : substr($search, 0, 200);
         $hasPagination = $search !== '' || array_key_exists('page', $_GET) || array_key_exists('limit', $_GET);
 
         if (!$hasPagination) {
@@ -551,7 +537,6 @@ if ($resource === 'companies') {
         ]);
     }
 
-    $user = requireSession();
     requireRole($user, ['admin', 'coordinator']);
 
     if ($method === 'POST' && ($body['_method'] ?? '') !== 'PUT' && ($body['_method'] ?? '') !== 'DELETE') {
@@ -564,10 +549,12 @@ if ($resource === 'companies') {
         $coordinates = parseCoordinatePair($body, 'Company');
         $allowedRadius = parseAllowedRadiusMeters($body);
         $status = trim($body['status'] ?? 'Active');
-        if (!in_array($status, ['Active', 'Inactive'], true)) {
-            sendError('Company status must be Active or Inactive.');
+        if ($name === '' || ($address === '' && $location === '') || strlen($name) > 200 || strlen($address) > 65535
+            || strlen($contactPerson) > 160 || strlen($contactEmail) > 160 || strlen($contactPhone) > 60
+            || !in_array($status, ['Active', 'Inactive'], true)
+            || ($contactEmail !== '' && !filter_var($contactEmail, FILTER_VALIDATE_EMAIL))) {
+            sendError('Provide a company name, address, valid contact email, and status.');
         }
-        if (!$name || (!$address && !$location)) sendError('Company name and address/location are required.');
         if ($contactPerson === '') {
             $contactPerson = $name;
         }
@@ -591,23 +578,34 @@ if ($resource === 'companies') {
     if ($method === 'PUT' || ($method === 'POST' && ($body['_method'] ?? '') === 'PUT')) {
         $id = intval($body['id'] ?? 0);
         if ($id <= 0) sendError('Invalid ID.');
+        $name = trim($body['name'] ?? '');
         $address = trim($body['address'] ?? $body['location'] ?? '');
         $location = trim($body['location'] ?? $address);
         $contactPerson = trim($body['contact_person'] ?? '');
+        $contactEmail = trim($body['contact_email'] ?? '');
+        $contactPhone = trim($body['contact_phone'] ?? '');
+        $status = trim($body['status'] ?? 'Active');
+        if ($name === '' || ($address === '' && $location === '') || $contactPerson === ''
+            || !in_array($status, ['Active', 'Inactive'], true)
+            || ($contactEmail !== '' && !filter_var($contactEmail, FILTER_VALIDATE_EMAIL))) {
+            sendError('Provide a company name, address, contact person, valid email, and status.');
+        }
+        $duplicate = $pdo->prepare('SELECT id FROM companies WHERE name = ? AND id <> ? LIMIT 1');
+        $duplicate->execute([$name, $id]);
+        if ($duplicate->fetch()) sendError('Company name already exists.', 409);
+        $exists = $pdo->prepare('SELECT id FROM companies WHERE id = ? LIMIT 1');
+        $exists->execute([$id]);
+        if (!$exists->fetch()) sendError('Company not found.', 404);
         $coordinates = parseCoordinatePair($body, 'Company');
         $allowedRadius = parseAllowedRadiusMeters($body);
-        $status = trim($body['status'] ?? 'Active');
-        if (!in_array($status, ['Active', 'Inactive'], true)) {
-            sendError('Company status must be Active or Inactive.');
-        }
         $stmt = $pdo->prepare('UPDATE companies SET name=?, location=?, contact_person=?, address=?, contact_email=?, contact_phone=?, latitude=?, longitude=?, allowed_radius_meters=?, status=? WHERE id=?');
         $stmt->execute([
-            trim($body['name'] ?? ''),
+            $name,
             $location ?: $address,
             $contactPerson,
             $address,
-            trim($body['contact_email'] ?? ''),
-            trim($body['contact_phone'] ?? ''),
+            $contactEmail,
+            $contactPhone,
             $coordinates['latitude'] ?? null,
             $coordinates['longitude'] ?? null,
             $allowedRadius,
@@ -622,6 +620,18 @@ if ($resource === 'companies') {
         requireRole($user, ['admin']);
         $id = intval($body['id'] ?? $_GET['id'] ?? 0);
         if ($id <= 0) sendError('Invalid ID.');
+        $companyStmt = $pdo->prepare('SELECT name FROM companies WHERE id = ? LIMIT 1');
+        $companyStmt->execute([$id]);
+        $companyName = $companyStmt->fetchColumn();
+        if ($companyName === false) sendError('Company not found.', 404);
+        $dependencies = $pdo->prepare('SELECT
+            (SELECT COUNT(*) FROM assignments WHERE company_id = ?) +
+            (SELECT COUNT(*) FROM coordinator_company WHERE company_id = ?) +
+            (SELECT COUNT(*) FROM coordinator_company_assignments WHERE company_id = ?) +
+            (SELECT COUNT(*) FROM users WHERE company_id = ?) +
+            (SELECT COUNT(*) FROM users WHERE company_id IS NULL AND company = ?)');
+        $dependencies->execute([$id, $id, $id, $id, $companyName]);
+        if ((int)$dependencies->fetchColumn() > 0) sendError('This company is linked to users or internship assignments and cannot be deleted.', 409);
         $pdo->prepare('DELETE FROM companies WHERE id=?')->execute([$id]);
         logActivity($pdo, (int)$user['id'], 'Delete Company', 'Deleted company #' . $id . '.');
         send(['success' => true, 'message' => 'Company deleted.']);
@@ -643,7 +653,11 @@ if ($resource === 'admin_report') {
                     co.name AS coordinator_name,
                     company_sup.name AS supervisor_name,
                     COALESCE(a.internship_status, "Pending") AS internship_status,
-                    sy.year_label
+                    sy.year_label,
+                    a.hours_completed,
+                    a.hours_required,
+                    a.evaluation_score,
+                    a.completion_cleared
              FROM users u
              LEFT JOIN programs p ON p.id = u.program_id
              LEFT JOIN assignments a ON a.student_id = u.id
@@ -655,13 +669,7 @@ if ($resource === 'admin_report') {
                  GROUP BY program_id
              ) program_coordinator ON program_coordinator.program_id = u.program_id
              LEFT JOIN users co ON co.id = program_coordinator.coordinator_id
-             LEFT JOIN users company_sup ON company_sup.id = (
-                 SELECT assigned_sup.id FROM users assigned_sup
-                 WHERE assigned_sup.role = "supervisor"
-                     AND assigned_sup.status = "Active"
-                     AND assigned_sup.company_id = a.company_id
-                 ORDER BY assigned_sup.id ASC LIMIT 1
-             )
+             LEFT JOIN users company_sup ON company_sup.id = a.supervisor_id AND company_sup.role = "supervisor" AND company_sup.status = "Active"
              LEFT JOIN school_years sy ON sy.id = a.school_year_id
              WHERE u.role = "student" AND u.status = "Active"
              ORDER BY u.name ASC'
@@ -839,7 +847,6 @@ if ($resource === 'assignments') {
                         company_sup.name AS supervisor_name, co.name AS coordinator_name,
                         sy.year_label, sy.semester
                  FROM assignments a
-                  JOIN users u ON u.id = a.student_id
                  LEFT JOIN companies c ON a.company_id = c.id
                  LEFT JOIN users company_sup ON company_sup.id = (
                      SELECT assigned_sup.id FROM users assigned_sup
@@ -848,13 +855,7 @@ if ($resource === 'assignments') {
                          AND assigned_sup.company_id = a.company_id
                      ORDER BY assigned_sup.id ASC LIMIT 1
                  )
-                  LEFT JOIN (
-                      SELECT program_id, MIN(id) AS coordinator_id
-                      FROM users
-                      WHERE role = "coordinator" AND status = "Active" AND program_id IS NOT NULL
-                      GROUP BY program_id
-                  ) program_coordinator ON program_coordinator.program_id = u.program_id
-                  LEFT JOIN users co ON co.id = program_coordinator.coordinator_id
+                 LEFT JOIN users co ON a.coordinator_id = co.id
                  LEFT JOIN school_years sy ON a.school_year_id = sy.id
                  WHERE a.student_id = ? LIMIT 1'
             );
@@ -881,13 +882,7 @@ if ($resource === 'assignments') {
                          AND assigned_sup.company_id = a.company_id
                      ORDER BY assigned_sup.id ASC LIMIT 1
                  )
-                 LEFT JOIN (
-                     SELECT program_id, MIN(id) AS coordinator_id
-                     FROM users
-                     WHERE role = "coordinator" AND status = "Active" AND program_id IS NOT NULL
-                     GROUP BY program_id
-                 ) program_coordinator ON program_coordinator.program_id = u.program_id
-                 LEFT JOIN users co ON co.id = program_coordinator.coordinator_id
+                 LEFT JOIN users co ON co.id = a.coordinator_id
                  LEFT JOIN school_years sy ON a.school_year_id = sy.id
                  JOIN users supervisor ON supervisor.id = ?
                     AND supervisor.role = "supervisor"
@@ -946,13 +941,7 @@ if ($resource === 'assignments') {
                          AND assigned_sup.company_id = a.company_id
                      ORDER BY assigned_sup.id ASC LIMIT 1
                  )
-                 LEFT JOIN (
-                     SELECT program_id, MIN(id) AS coordinator_id
-                     FROM users
-                     WHERE role = "coordinator" AND status = "Active" AND program_id IS NOT NULL
-                     GROUP BY program_id
-                 ) program_coordinator ON program_coordinator.program_id = u.program_id
-                 LEFT JOIN users co ON co.id = program_coordinator.coordinator_id
+                 LEFT JOIN users co ON a.coordinator_id = co.id
                  LEFT JOIN school_years sy ON a.school_year_id = sy.id
                  ORDER BY a.assigned_at DESC'
             );
@@ -1120,22 +1109,13 @@ if ($resource === 'attendance') {
     if ($method === 'POST') {
         requireRole($user, ['student']);
         $action = trim($body['action'] ?? '');
-        if ($action === 'validate_location') {
-            $location = validateAttendanceLocation($pdo, $userId, $body);
-            send([
-                'success' => true,
-                'message' => 'Location verified.',
-                'distance_meters' => round($location['distance_meters'], 2),
-                'allowed_radius_meters' => $location['allowed_radius_meters'],
-            ]);
-        }
         $legacyActions = ['time_in' => 'morning_time_in', 'time_out' => 'morning_time_out'];
         $eventType = $legacyActions[$action] ?? $action;
         $eventColumns = [
-            'morning_time_in' => ['time_in', 'face_snapshot_in', 'time_in_latitude', 'time_in_longitude', 'time_in_accuracy', 'time_in_address', 'time_in_distance', 'time_in_distance_meters', 'time_in_location_status', 'verification_status'],
-            'morning_time_out' => ['time_out', 'face_snapshot_out', 'time_out_latitude', 'time_out_longitude', 'time_out_accuracy', 'time_out_address', 'time_out_distance', 'time_out_distance_meters', 'time_out_location_status', 'time_out_verification_status'],
-            'afternoon_time_in' => ['afternoon_time_in', 'afternoon_face_snapshot_in', 'afternoon_time_in_latitude', 'afternoon_time_in_longitude', 'afternoon_time_in_accuracy', 'afternoon_time_in_address', 'afternoon_time_in_distance', 'afternoon_time_in_distance_meters', 'afternoon_time_in_location_status', 'afternoon_time_in_verification_status'],
-            'afternoon_time_out' => ['afternoon_time_out', 'afternoon_face_snapshot_out', 'afternoon_time_out_latitude', 'afternoon_time_out_longitude', 'afternoon_time_out_accuracy', 'afternoon_time_out_address', 'afternoon_time_out_distance', 'afternoon_time_out_distance_meters', 'afternoon_time_out_location_status', 'afternoon_time_out_verification_status'],
+            'morning_time_in' => ['time_in', 'face_snapshot_in', 'verification_status'],
+            'morning_time_out' => ['time_out', 'face_snapshot_out', 'time_out_verification_status'],
+            'afternoon_time_in' => ['afternoon_time_in', 'afternoon_face_snapshot_in', 'afternoon_time_in_verification_status'],
+            'afternoon_time_out' => ['afternoon_time_out', 'afternoon_face_snapshot_out', 'afternoon_time_out_verification_status'],
         ];
         $eventLabels = [
             'morning_time_in' => 'Morning Time In',
@@ -1147,7 +1127,6 @@ if ($resource === 'attendance') {
             sendError('Invalid attendance event.', 400);
         }
 
-        $location = validateAttendanceLocation($pdo, $userId, $body);
         $faceEncoding = trim($body['face_encoding'] ?? '');
         verifyStudentFace($pdo, $userId, $faceEncoding);
         $faceSnapshot = trim($body['face_snapshot'] ?? '');
@@ -1210,7 +1189,7 @@ if ($resource === 'attendance') {
                 }
             }
 
-            [$timestampColumn, $snapshotColumn, $latitudeColumn, $longitudeColumn, $accuracyColumn, $addressColumn, $distanceColumn, $distanceMetersColumn, $locationStatusColumn, $verificationColumn] = $eventColumns[$eventType];
+            [$timestampColumn, $snapshotColumn, $verificationColumn] = $eventColumns[$eventType];
             $row[$timestampColumn] = $now;
             $morningSeconds = calculateAttendancePairSeconds($row['time_in'] ?? null, $row['time_out'] ?? null);
             $afternoonSeconds = calculateAttendancePairSeconds($row['afternoon_time_in'] ?? null, $row['afternoon_time_out'] ?? null);
@@ -1224,16 +1203,11 @@ if ($resource === 'attendance') {
                 $status = $nowTimestamp > $lateThreshold ? 'Late' : 'Present';
             }
 
-            $updateSql = "UPDATE attendance_logs SET `$timestampColumn`=?, `$snapshotColumn`=?, `$latitudeColumn`=?, `$longitudeColumn`=?, `$accuracyColumn`=?, `$addressColumn`=NULL, `$distanceColumn`=?, `$distanceMetersColumn`=?, `$locationStatusColumn`='Verified', `$verificationColumn`='Verified', duration_minutes=?, status=? WHERE id=?";
+            $updateSql = "UPDATE attendance_logs SET `$timestampColumn`=?, `$snapshotColumn`=?, `$verificationColumn`='Verified', duration_minutes=?, status=? WHERE id=?";
             $updateStmt = $pdo->prepare($updateSql);
             $updateStmt->execute([
                 $now,
                 $faceSnapshot,
-                $location['latitude'],
-                $location['longitude'],
-                $location['accuracy'],
-                $location['distance_meters'],
-                $location['distance_meters'],
                 $totalMinutes,
                 $status,
                 (int)$row['id'],
@@ -1274,8 +1248,6 @@ if ($resource === 'attendance') {
             'morning_seconds' => $morningSeconds,
             'afternoon_seconds' => $afternoonSeconds,
             'total_seconds' => $totalSeconds,
-            'location_status' => 'Verified',
-            'distance_meters' => round($location['distance_meters'], 2),
         ]);
     }
 }
@@ -1745,6 +1717,7 @@ if ($resource === 'evaluations') {
 // INIT DATA (bulk-load for app startup)
 // =====================================================
 if ($resource === 'init') {
+    requireSession();
     $syStmt = $pdo->query('SELECT * FROM school_years ORDER BY id DESC');
     $progStmt = $pdo->query("SELECT p.*, COALESCE(GROUP_CONCAT(DISTINCT u.name ORDER BY u.name SEPARATOR ', '), 'Unassigned') AS coordinator_name
         FROM programs p
@@ -1761,6 +1734,7 @@ if ($resource === 'init') {
     $compStmt = $pdo->query('SELECT * FROM companies WHERE status = "Active" ORDER BY name ASC');
     $supStmt = $pdo->query("SELECT u.id, u.name, u.email, u.contact, u.company_id, COALESCE(c.name, u.company) AS company, u.status FROM users u LEFT JOIN companies c ON c.id = u.company_id WHERE u.role='supervisor' AND u.status='Active' ORDER BY u.name ASC");
     $coordStmt = $pdo->query("SELECT u.id, u.name, u.email, u.contact, u.employee_id, u.program_id, COALESCE(p.name, p.code, u.program) AS program, status FROM users u LEFT JOIN programs p ON p.id = u.program_id WHERE u.role='coordinator' AND u.status='Active' ORDER BY u.name ASC");
+    $activityStmt = $pdo->query('SELECT user_name, role, action, description, created_at FROM activity_logs ORDER BY created_at DESC, id DESC LIMIT 5');
 
         $statsStmt = $pdo->query("SELECT
                 (SELECT COUNT(DISTINCT id) FROM users WHERE role = 'student' AND status = 'Active') AS total_students,
@@ -1795,6 +1769,7 @@ if ($resource === 'init') {
         'companies' => $compStmt->fetchAll(),
         'supervisors' => $supStmt->fetchAll(),
         'coordinators' => $coordStmt->fetchAll(),
+        'recent_activities' => $activityStmt->fetchAll(),
         'dashboard_stats' => array_map('intval', $stats),
     ]);
 }
@@ -1804,19 +1779,15 @@ if ($resource === 'init') {
 // =====================================================
 if ($resource === 'profile') {
     $user = requireSession();
-    setPrivatePageHeaders();
     $userId = intval($user['id'] ?? 0);
 
     if ($method === 'GET') {
          $stmt = $pdo->prepare('SELECT u.id, u.name, u.email, u.username, u.contact, u.address, u.student_id,
                                       u.section, u.program_id, u.academic_year,
                            COALESCE(p.code, p.name, u.program) AS program,
-                           u.employee_id,
-                           a.id AS assignment_id, a.internship_status AS assignment_status,
-                           c.name AS company_name,
-                           COALESCE(NULLIF(c.address, ""), NULLIF(c.location, "")) AS company_location,
-                           COALESCE(assignment_supervisor.name, company_supervisor.name) AS supervisor_name,
-                           COALESCE(assignment_coordinator.name, program_coordinator_user.name) AS coordinator_name,
+                           u.employee_id, u.company_id, COALESCE(c.name, u.company) AS company_name,
+                           c.contact_person AS company_contact_person, c.contact_email AS company_email,
+                                                     c.contact_phone AS company_phone, c.location AS company_location,
                                                      (SELECT fr.face_image FROM face_registrations fr
                                                         WHERE fr.student_id = u.student_id
                                                             AND fr.registration_status = "Registered"
@@ -1825,37 +1796,7 @@ if ($resource === 'profile') {
                                                         ORDER BY fr.id DESC LIMIT 1) AS face_image
                                FROM users u
                                LEFT JOIN programs p ON p.id = u.program_id
-                               LEFT JOIN assignments a ON a.id = (
-                                   SELECT latest_assignment.id FROM assignments latest_assignment
-                                   WHERE latest_assignment.student_id = u.id
-                                   ORDER BY latest_assignment.updated_at DESC, latest_assignment.id DESC
-                                   LIMIT 1
-                               )
-                               LEFT JOIN companies c ON c.id = a.company_id
-                               LEFT JOIN users assignment_supervisor
-                                   ON assignment_supervisor.id = a.supervisor_id
-                                   AND assignment_supervisor.role = "supervisor"
-                                   AND assignment_supervisor.status = "Active"
-                                   AND assignment_supervisor.company_id = a.company_id
-                               LEFT JOIN users company_supervisor ON company_supervisor.id = (
-                                   SELECT company_sup.id FROM users company_sup
-                                   WHERE company_sup.role = "supervisor"
-                                       AND company_sup.status = "Active"
-                                       AND company_sup.company_id = a.company_id
-                                   ORDER BY company_sup.id ASC LIMIT 1
-                               )
-                               LEFT JOIN users assignment_coordinator
-                                   ON assignment_coordinator.id = a.coordinator_id
-                                   AND assignment_coordinator.role = "coordinator"
-                                   AND assignment_coordinator.status = "Active"
-                                   AND assignment_coordinator.program_id = u.program_id
-                               LEFT JOIN (
-                                   SELECT program_id, MIN(id) AS coordinator_id
-                                   FROM users
-                                   WHERE role = "coordinator" AND status = "Active" AND program_id IS NOT NULL
-                                   GROUP BY program_id
-                               ) program_coordinator ON program_coordinator.program_id = u.program_id
-                               LEFT JOIN users program_coordinator_user ON program_coordinator_user.id = program_coordinator.coordinator_id
+                       LEFT JOIN companies c ON c.id = u.company_id
                                WHERE u.id = ? AND u.role = ? AND u.status = "Active"
                                LIMIT 1');
         $stmt->execute([$userId, $user['role']]);
@@ -1870,38 +1811,34 @@ if ($resource === 'profile') {
     if ($method === 'POST') {
         $nameInput = $body['name'] ?? '';
         $emailInput = $body['email'] ?? '';
-        $contactWasSubmitted = array_key_exists('contact', $body);
-        $contactInput = $contactWasSubmitted ? $body['contact'] : null;
+        $contactInput = $body['contact'] ?? '';
         $currentPassInput = $body['current_password'] ?? '';
         $newPassInput = $body['new_password'] ?? '';
         $confirmPassInput = $body['confirm_password'] ?? '';
-        if (!is_string($nameInput) || !is_string($emailInput) || ($contactWasSubmitted && !is_string($contactInput))
+        if (!is_string($nameInput) || !is_string($emailInput) || !is_string($contactInput)
             || !is_string($currentPassInput) || !is_string($newPassInput) || !is_string($confirmPassInput)) {
             sendError('Profile fields must be text values.');
         }
         $name = trim($nameInput);
         $email = trim($emailInput);
-        $contact = $contactWasSubmitted ? trim($contactInput) : null;
+        $contact = trim($contactInput);
         $currentPass = trim($currentPassInput);
         $newPass = trim($newPassInput);
         $confirmPass = trim($confirmPassInput);
 
-        if ($newPass !== '' && ($name !== '' || $email !== '' || $contactWasSubmitted)) {
+        if ($newPass !== '' && ($name !== '' || $email !== '' || $contact !== '')) {
             sendError('Update profile information and password in separate requests.');
         }
 
-        $savedProfile = null;
-        if ($name !== '' || $email !== '' || $contactWasSubmitted) {
+        if ($name !== '' || $email !== '' || $contact !== '') {
             $nameLength = function_exists('mb_strlen') ? mb_strlen($name, 'UTF-8') : strlen($name);
-            if ($nameLength < 1 || $nameLength > 120 || strlen($email) > 160 || ($contactWasSubmitted && strlen($contact) > 100)
+            if ($nameLength < 1 || $nameLength > 120 || strlen($email) > 160 || strlen($contact) > 100
                 || $email === '' || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
                 sendError('A name and valid email address are required.');
             }
-            $account = $pdo->prepare('SELECT id, contact FROM users WHERE id = ? AND role = ? AND status = "Active" LIMIT 1');
+            $account = $pdo->prepare('SELECT id FROM users WHERE id = ? AND role = ? AND status = "Active" LIMIT 1');
             $account->execute([$userId, $user['role']]);
-            $accountRow = $account->fetch();
-            if (!$accountRow) sendError('Authenticated user record not found.', 404);
-            $contact = $contactWasSubmitted ? $contact : $accountRow['contact'];
+            if (!$account->fetch()) sendError('Authenticated user record not found.', 404);
 
             $duplicate = $pdo->prepare('SELECT id FROM users WHERE email = ? AND id <> ? LIMIT 1');
             $duplicate->execute([$email, $userId]);
@@ -1923,10 +1860,6 @@ if ($resource === 'profile') {
             }
             session_write_close();
             logActivity($pdo, $userId, 'Update Profile', 'Updated profile information.');
-            $refreshedProfile = $pdo->prepare('SELECT id, name, email, contact FROM users WHERE id = ? AND role = ? AND status = "Active" LIMIT 1');
-            $refreshedProfile->execute([$userId, $user['role']]);
-            $savedProfile = $refreshedProfile->fetch();
-            if (!$savedProfile) sendError('Authenticated user record not found.', 404);
         }
 
         if ($newPass !== '') {
@@ -1944,11 +1877,7 @@ if ($resource === 'profile') {
             logActivity($pdo, $userId, 'Update Profile', 'Changed account password.');
         }
 
-        send([
-            'success' => true,
-            'message' => $newPass !== '' ? 'Password updated successfully.' : 'Profile updated successfully.',
-            'profile' => $savedProfile,
-        ]);
+        send(['success' => true, 'message' => $newPass !== '' ? 'Password updated successfully.' : 'Profile updated successfully.']);
     }
 }
 
@@ -1975,7 +1904,6 @@ if ($resource === 'student_records') {
                            WHEN fr.registration_status = "Registered"
                                 AND attendance_today.time_in IS NOT NULL
                                 AND attendance_today.verification_status = "Verified"
-                                AND attendance_today.time_in_location_status = "Verified"
                            THEN attendance_today.status
                            ELSE "Absent"
                        END AS attendance_status,
@@ -2109,7 +2037,6 @@ if ($resource === 'student_records') {
         send(['success' => true, 'message' => 'Student record updated.']);
     }
 }
-
 
 // Fallback
 sendError('Unknown resource: ' . htmlspecialchars($resource), 404);

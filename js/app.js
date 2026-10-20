@@ -12,9 +12,7 @@ let faceRegCameraStream = null;
 let faceRegCanvas = null;
 let genModalSaveCallback = null;
 let lastAttendanceScan = null;
-let pendingAttendanceLocation = null;
 let pendingAttendanceEventType = null;
-let attendanceLocationRequestId = 0;
 let faceValidationLoop = null;
 let faceValidationCanvas = null;
 let embeddedFacePreviewStream = null;
@@ -68,6 +66,7 @@ let DASHBOARD_STATS = {
   active_internships: 0,
   total_programs: 0
 };
+let ADMIN_RECENT_ACTIVITIES = [];
 
 function ensureAdminRenderers() {
   if (PAGE_RENDERERS.admin) return;
@@ -139,7 +138,7 @@ function recordBackendActivity(action, description) {
 }
 
 function escapeHtml(value) {
-  return String(value || '')
+  return String(value ?? '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
@@ -778,8 +777,6 @@ function normalizeStudentTask(task) {
 async function loadStudentTasks() {
   if (currentRole !== 'student') return;
   try {
-    STUDENT_TASKS = [];
-    TASK_UNREAD_COUNTS.student = 0;
     const response = await fetch(`${API_BASE}?resource=tasks&_=${Date.now()}`, { cache: 'no-store' });
     const data = await response.json();
     if (!data.success || !Array.isArray(data.tasks)) throw new Error(data.message || 'Unable to load tasks.');
@@ -797,7 +794,12 @@ let SUPERVISOR_TASKS = [];
 
 let ATTENDANCE_LOG = [];
 
-let SUBMISSIONS = [];
+let SUBMISSIONS = [
+  { student:'Juan dela Cruz', task:'Weekly Journal', name:'Week11_Journal.pdf', date:'Apr 22', status:'Approved', tag:'tag-green' },
+  { student:'Juan dela Cruz', task:'Database Schema Report', name:'DB_Schema_Report.docx', date:'Apr 20', status:'Approved', tag:'tag-green' },
+  { student:'Paolo Mendoza', task:'Meeting Minutes', name:'Meeting_Minutes_Apr15.pdf', date:'Apr 15', status:'For Review', tag:'tag-amber' },
+  { student:'Juan dela Cruz', task:'System Documentation', name:'SysDoc_Draft_v1.docx', date:'Apr 28', status:'For Review', tag:'tag-amber' },
+];
 
 let pendingUploadFile = null;
 
@@ -851,7 +853,7 @@ const NAV = {
     { id:'dashboard', icon:'📊', label:'Dashboard' },
     { id:'facereg', icon:'<i class="bi bi-camera-fill"></i>', label:'Face Registration' },
     { id:'timein', icon:'📷', label:'Time In / Time Out' },
-    { id:'tasks', icon:'✅', label:'My Tasks', badge: 0 },
+    { id:'tasks', icon:'✅', label:'My Tasks', badge: 3 },
     { id:'submissions', icon:'📁', label:'File Submissions' },
     { id:'attendance', icon:'🗓️', label:'My Attendance' },
   ],
@@ -881,7 +883,7 @@ const NAV = {
   };
 
 const TASK_UNREAD_COUNTS = {
-  student: 0,
+  student: 3,
   supervisor: 2,
   coordinator: 0,
   admin: 0
@@ -895,6 +897,7 @@ const ADMIN_USER_MGMT_STATE = {
 let ADMIN_USER_LIST = [];
 let ADMIN_USER_MGMT_LOADING = false;
 let ADMIN_USER_MGMT_ALERT = '';
+let ADMIN_USER_MGMT_ERROR = false;
 
 function switchAdminUserTab(tab) {
   if (!['students','coordinators','supervisors'].includes(tab)) return;
@@ -1169,7 +1172,7 @@ function renderAdminUserManagementTabContent() {
   `;
 }
 
-async function formatUserCreatedDate(value) {
+function formatUserCreatedDate(value) {
   if (!value || (typeof value === 'object' && typeof value.then === 'function')) return 'N/A';
   const date = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(date.getTime())) return String(value || 'N/A');
@@ -1193,67 +1196,35 @@ function getSafeUserCreatedText(value) {
 async function fetchAdminUsers() {
   ADMIN_USER_MGMT_LOADING = true;
   renderAdminUserManagementTab();
+  let timeout;
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3000);
+    timeout = setTimeout(() => controller.abort(), 8000);
     const response = await fetch('../php/users.php', { signal: controller.signal });
-    clearTimeout(timeout);
     const data = await response.json();
-    if (data.success && Array.isArray(data.users)) {
-      ADMIN_USER_LIST = data.users.map(user => ({
-        ...user,
-        role: String(user.role || '').toLowerCase(),
-        status: String(user.status || 'Active'),
-        created: getSafeUserCreatedText(user.created || user.created_at || '')
-      }));
-    } else {
-      ADMIN_USER_LIST = getDemoAdminUsers();
+    if (!response.ok || !data.success || !Array.isArray(data.users)) {
+      throw new Error(data.message || 'Unable to load accounts from the database.');
     }
+    ADMIN_USER_LIST = data.users.map(user => ({
+      ...user,
+      role: String(user.role || '').toLowerCase(),
+      status: String(user.status || 'Active'),
+      created: getSafeUserCreatedText(user.created || user.created_at || '')
+    }));
+    ADMIN_USER_MGMT_ALERT = '';
+    ADMIN_USER_MGMT_ERROR = false;
   } catch (error) {
-    ADMIN_USER_LIST = getDemoAdminUsers();
+    ADMIN_USER_LIST = [];
+    ADMIN_USER_MGMT_ALERT = error.name === 'AbortError'
+      ? 'Account loading timed out. Please try again.'
+      : (error.message || 'Unable to load accounts from the database.');
+    ADMIN_USER_MGMT_ERROR = true;
     console.warn('Unable to load admin users:', error);
+  } finally {
+    clearTimeout(timeout);
   }
   ADMIN_USER_MGMT_LOADING = false;
-  ADMIN_USER_MGMT_ALERT = '';
   renderAdminUserManagementTab();
-}
-
-function getDemoAdminUsers() {
-  const users = [
-    { id: 1, name: 'Admin User', username: 'admin', email: 'admin@bisu.edu.ph', role: 'admin', status: 'Active', created: formatUserCreatedDate(new Date(Date.now() - 86400000)) },
-    ...ADMIN_STUDENTS.map((student, index) => ({
-      id: index + 2,
-      name: student.name,
-      username: student.username,
-      email: student.email,
-      role: 'student',
-      status: student.status || 'Active',
-      student_id: student.studentId,
-      program: student.program,
-      created: formatUserCreatedDate(new Date(Date.now() - (index + 2) * 86400000))
-    })),
-    ...COORDINATORS.map((coordinator, index) => ({
-      id: index + 20,
-      name: coordinator.name,
-      username: coordinator.email?.split('@')[0] || '',
-      email: coordinator.email,
-      role: 'coordinator',
-      status: coordinator.status || 'Active',
-      program: coordinator.prog,
-      created: formatUserCreatedDate(new Date(Date.now() - (index + 5) * 86400000))
-    })),
-    ...SUPERVISORS.map((supervisor, index) => ({
-      id: index + 30,
-      name: supervisor.name,
-      username: supervisor.email?.split('@')[0] || '',
-      email: supervisor.email,
-      role: 'supervisor',
-      status: supervisor.status || 'Active',
-      company: supervisor.company,
-      created: formatUserCreatedDate(new Date(Date.now() - (index + 7) * 86400000))
-    }))
-  ];
-  return users;
 }
 
 function renderAdminUserManagementTab() {
@@ -1261,7 +1232,7 @@ function renderAdminUserManagementTab() {
   if (!target) return;
   const alertContainer = document.getElementById('admin-user-mgmt-alert');
   if (alertContainer) {
-    alertContainer.innerHTML = ADMIN_USER_MGMT_ALERT ? `<div class="alert alert-success alert-dismissible fade show" role="alert">${escapeHtml(ADMIN_USER_MGMT_ALERT)}<button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close" onclick="ADMIN_USER_MGMT_ALERT = ''; renderAdminUserManagementTab();"></button></div>` : '';
+    alertContainer.innerHTML = ADMIN_USER_MGMT_ALERT ? `<div class="alert alert-${ADMIN_USER_MGMT_ERROR ? 'danger' : 'success'} alert-dismissible fade show" role="alert">${escapeHtml(ADMIN_USER_MGMT_ALERT)}<button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close" onclick="ADMIN_USER_MGMT_ALERT = ''; ADMIN_USER_MGMT_ERROR = false; renderAdminUserManagementTab();"></button></div>` : '';
   }
   target.innerHTML = renderAdminUserManagementTabContent();
   document.querySelectorAll('.admin-user-tab-btn').forEach(btn => btn.classList.toggle('active', btn.dataset.tab === ADMIN_USER_MGMT_STATE.tab));
@@ -1364,8 +1335,8 @@ function openProgramModal(mode, index = null) {
   const body = `
     <div class="form-row"><label class="form-label">Program Code</label><input class="form-input" id="gen-program-code" type="text" value="${escapeHtml(program.code)}" placeholder="e.g. BSIT"></div>
     <div class="form-row"><label class="form-label">Program Name</label><input class="form-input" id="gen-program-name" type="text" value="${escapeHtml(program.name)}" placeholder="Full program name"></div>
-    <div class="form-row"><label class="form-label">Required Hours</label><input class="form-input" id="gen-program-req" type="number" min="0" value="${escapeHtml(program.req || '')}" placeholder="Hours required"></div>
-    <div class="form-row"><label class="form-label">Active Students</label><input class="form-input" id="gen-program-students" type="number" min="0" value="${escapeHtml(program.students || '')}" placeholder="Number of students"></div>
+    <div class="form-row"><label class="form-label">Required Hours</label><input class="form-input" id="gen-program-req" type="number" min="0" value="${escapeHtml(program.req ?? '')}" placeholder="Hours required"></div>
+    <div class="form-row"><label class="form-label">Active Students</label><input class="form-input" id="gen-program-students" type="number" min="0" value="${escapeHtml(program.students ?? '')}" placeholder="Number of students"></div>
     <div class="form-row"><label class="form-label">Coordinator</label><div class="form-text">${escapeHtml(program.coord || 'Unassigned')}</div></div>
   `;
   openGenModal(mode === 'edit' ? 'Edit Program' : 'Add Program', body, () => saveProgram(mode, index), mode === 'edit' ? 'Update' : 'Add');
@@ -1396,26 +1367,30 @@ function viewProgramStudents(index) {
   openGenModal(`Students for ${escapeHtml(program.code)}`, body, null, 'Close');
 }
 
-function deleteProgram(index) {
+async function deleteProgram(index) {
   if (!confirm('Are you sure you want to delete this program?')) return;
   const program = PROGRAMS[index];
-  PROGRAMS.splice(index, 1);
-  logAdminActivity('Delete', `Deleted program "${program.code}".`);
-  addNotification(`Program deleted: ${program.code}`, 'warning');
-  if (program.id) {
-    const params = new URLSearchParams({ id: program.id, _method: 'DELETE' });
-    fetch(`${API_BASE}?resource=programs`, {
+  if (!program?.id) {
+    alert('Unable to delete this program because its database ID is missing.');
+    return;
+  }
+  const params = new URLSearchParams({ id: program.id, _method: 'DELETE' });
+  try {
+    const response = await fetch(`${API_BASE}?resource=programs`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: params.toString()
-    }).catch(err => console.warn('deleteProgram failed:', err));
-  }
-  if (currentPage === 'programs') {
-    navigateTo('programs');
+    });
+    const data = await response.json();
+    if (!response.ok || !data.success) throw new Error(data.message || 'Unable to delete program.');
+    await loadInitialData();
+    if (currentPage === 'programs') navigateTo('programs');
+  } catch (error) {
+    alert(error.message || 'Unable to delete program.');
   }
 }
 
-function saveSchoolYear(mode, index) {
+async function saveSchoolYear(mode, index) {
   const existingSchoolYear = mode === 'edit' && index !== null ? SCHOOL_YEARS[index] : null;
   const year = document.getElementById('gen-sy-year').value.trim();
   const semester = document.getElementById('gen-sy-semester').value.trim();
@@ -1429,18 +1404,7 @@ function saveSchoolYear(mode, index) {
     return false;
   }
 
-  const syData = { id: existingSchoolYear?.id, year, semester, start, end, students, status };
-  if (mode === 'edit') {
-    SCHOOL_YEARS[index] = syData;
-    logAdminActivity('Update', `Updated academic year "${year}".`);
-  } else {
-    SCHOOL_YEARS.unshift(syData);
-    logAdminActivity('Create', `Added academic year "${year}".`);
-  }
-
-  // Persist to DB
   const params = new URLSearchParams({
-    id: existingSchoolYear?.id || '',
     year_label: year,
     semester,
     start_date: start,
@@ -1448,50 +1412,51 @@ function saveSchoolYear(mode, index) {
     students_count: String(students),
     status
   });
-  fetch(`${API_BASE}?resource=school_years`, {
-    method: mode === 'edit' ? 'PUT' : 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: params.toString()
-  }).then(r => r.json()).then(data => {
-    if (!data.success) console.warn('saveSchoolYear failed:', data.message);
-    else loadInitialData().then(() => { if (currentPage === 'academicyear') navigateTo('academicyear'); });
-  }).catch(err => console.warn(err));
-
-  if (currentPage === 'academicyear') {
-    navigateTo('academicyear');
+  if (mode === 'edit') params.set('id', String(existingSchoolYear?.id || ''));
+  try {
+    const response = await fetch(`${API_BASE}?resource=school_years`, {
+      method: mode === 'edit' ? 'PUT' : 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: params.toString()
+    });
+    const data = await response.json();
+    if (!response.ok || !data.success) throw new Error(data.message || 'Unable to save the academic year.');
+    await loadInitialData();
+    if (currentPage === 'academicyear') navigateTo('academicyear');
+    return true;
+  } catch (error) {
+    alert(error.message || 'Unable to save the academic year.');
+    return false;
   }
 }
 
-function deleteSchoolYear(index) {
+async function deleteSchoolYear(index) {
   const schoolYear = SCHOOL_YEARS[index];
   if (!schoolYear || !confirm(`Delete academic year "${schoolYear.year}"?`)) return;
-
-  SCHOOL_YEARS.splice(index, 1);
-  logAdminActivity('Delete', `Deleted academic year "${schoolYear.year}".`);
-  if (schoolYear.id) {
-    fetch(`${API_BASE}?resource=school_years&id=${encodeURIComponent(schoolYear.id)}`, {
-      method: 'DELETE'
-    }).then(response => response.json()).then(data => {
-      if (!data.success) throw new Error(data.message || 'Delete failed.');
-    }).catch(error => {
-      console.warn('deleteSchoolYear failed:', error);
-      SCHOOL_YEARS.splice(index, 0, schoolYear);
-      addNotification('Unable to delete the academic year.', 'error');
-      navigateTo('academicyear');
-    });
+  if (!schoolYear.id) {
+    alert('Unable to delete this academic year because its database ID is missing.');
+    return;
   }
-  navigateTo('academicyear');
+  try {
+    const response = await fetch(`${API_BASE}?resource=school_years&id=${encodeURIComponent(schoolYear.id)}`, { method: 'DELETE' });
+    const data = await response.json();
+    if (!response.ok || !data.success) throw new Error(data.message || 'Unable to delete the academic year.');
+    await loadInitialData();
+    navigateTo('academicyear');
+  } catch (error) {
+    alert(error.message || 'Unable to delete the academic year.');
+  }
 }
 
 function openSchoolYearModal(index = null) {
-  const sy = typeof index === 'number' ? SCHOOL_YEARS[index] : { year:'2024–2025', semester:'2nd Semester', start:'Jan 15, 2025', end:'May 30, 2025', students:'', status:'Active' };
+  const sy = typeof index === 'number' ? SCHOOL_YEARS[index] : { year:'', semester:'', start:'', end:'', students:'0', status:'Not Started' };
   const body = `
     <div class="form-row"><label class="form-label">School Year</label><input class="form-input" id="gen-sy-year" type="text" value="${escapeHtml(sy.year)}" placeholder="e.g. 2024–2025"></div>
     <div class="form-row"><label class="form-label">Semester</label><input class="form-input" id="gen-sy-semester" type="text" value="${escapeHtml(sy.semester)}" placeholder="e.g. 2nd Semester"></div>
     <div class="form-row"><label class="form-label">Start Date</label><input class="form-input" id="gen-sy-start" type="text" value="${escapeHtml(sy.start)}" placeholder="e.g. Jan 15, 2025"></div>
     <div class="form-row"><label class="form-label">End Date</label><input class="form-input" id="gen-sy-end" type="text" value="${escapeHtml(sy.end)}" placeholder="e.g. May 30, 2025"></div>
-    <div class="form-row"><label class="form-label">Students</label><input class="form-input" id="gen-sy-students" type="number" min="0" value="${escapeHtml(sy.students || '')}" placeholder="Number of students"></div>
-    <div class="form-row"><label class="form-label">Status</label><select class="form-select" id="gen-sy-status"><option value="Active" ${sy.status==='Active'?'selected':''}>Active</option><option value="Completed" ${sy.status==='Completed'?'selected':''}>Completed</option></select></div>
+    <div class="form-row"><label class="form-label">Students</label><input class="form-input" id="gen-sy-students" type="number" min="0" value="${escapeHtml(sy.students ?? '')}" placeholder="Number of students"></div>
+    <div class="form-row"><label class="form-label">Status</label><select class="form-select" id="gen-sy-status"><option value="Not Started" ${sy.status==='Not Started'?'selected':''}>Not Started</option><option value="Active" ${sy.status==='Active'?'selected':''}>Active</option><option value="Completed" ${sy.status==='Completed'?'selected':''}>Completed</option></select></div>
   `;
   openGenModal(index !== null ? 'Edit School Year' : 'Add School Year', body, () => saveSchoolYear(index !== null ? 'edit' : 'add', index), index !== null ? 'Update' : 'Add');
 }
@@ -2045,7 +2010,7 @@ function openAccountModal(editId = null, selectedRole = null) {
       </div>
       <div class="col-md-6">
         <label class="form-label">Role</label>
-        <select class="form-select" id="gen-account-role" onchange="toggleAccountRoleFields()"><option value="student" ${role === 'student' ? 'selected' : ''}>Student</option><option value="coordinator" ${role === 'coordinator' ? 'selected' : ''}>Coordinator</option><option value="supervisor" ${role === 'supervisor' ? 'selected' : ''}>Supervisor</option></select>
+        <select class="form-select" id="gen-account-role" onchange="toggleAccountRoleFields()" ${isEdit ? 'disabled' : ''}><option value="student" ${role === 'student' ? 'selected' : ''}>Student</option><option value="coordinator" ${role === 'coordinator' ? 'selected' : ''}>Coordinator</option><option value="supervisor" ${role === 'supervisor' ? 'selected' : ''}>Supervisor</option></select>
       </div>
     </div>
     <div class="row g-3">
@@ -2573,6 +2538,17 @@ function initApp() {
 }
 
 async function loadInitialData() {
+  if (currentRole === 'admin') {
+    SCHOOL_YEARS = [];
+    PROGRAMS = [];
+    ADMIN_STUDENTS.length = 0;
+    ADMIN_COMPANIES.length = 0;
+    SUPERVISORS.length = 0;
+    COORDINATORS.length = 0;
+    INTERNSHIPS = [];
+    ADMIN_RECENT_ACTIVITIES = [];
+    Object.keys(DASHBOARD_STATS).forEach(key => { DASHBOARD_STATS[key] = 0; });
+  }
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 8000);
@@ -2582,7 +2558,15 @@ async function loadInitialData() {
     });
     clearTimeout(timeoutId);
     const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.message || 'Unable to load records from the database.');
     if (data.success) {
+      if (Array.isArray(data.recent_activities)) {
+        ADMIN_RECENT_ACTIVITIES = data.recent_activities.map(activity => ({
+          event: `${activity.user_name || 'System'}: ${activity.action || ''} - ${activity.description || ''}`,
+          time: activity.created_at ? new Date(activity.created_at).toLocaleString('en-PH') : '',
+          icon: activity.role === 'admin' ? '⚙️' : '📋'
+        }));
+      }
       if (data.dashboard_stats && typeof data.dashboard_stats === 'object') {
         Object.keys(DASHBOARD_STATS).forEach(key => {
           if (Object.prototype.hasOwnProperty.call(data.dashboard_stats, key)) {
@@ -2647,6 +2631,7 @@ async function loadInitialData() {
       }
 
       if (currentRole === 'admin') {
+        INTERNSHIPS = [];
         const reportResponse = await fetch(`${API_BASE}?resource=admin_report`);
         const reportData = await reportResponse.json();
         if (reportData.success && Array.isArray(reportData.reports)) {
@@ -2664,10 +2649,23 @@ async function loadInitialData() {
             completionCleared: Boolean(Number(assignment.completion_cleared)),
             requirements: {}
           }));
+        } else {
+          throw new Error(reportData.message || 'Unable to load Admin reports from the database.');
         }
       }
     }
   } catch (err) {
+    if (currentRole === 'admin') {
+      SCHOOL_YEARS = [];
+      PROGRAMS = [];
+      ADMIN_STUDENTS.length = 0;
+      ADMIN_COMPANIES.length = 0;
+      SUPERVISORS.length = 0;
+      COORDINATORS.length = 0;
+      INTERNSHIPS = [];
+      ADMIN_RECENT_ACTIVITIES = [];
+      Object.keys(DASHBOARD_STATS).forEach(key => { DASHBOARD_STATS[key] = 0; });
+    }
     console.warn('loadInitialData failed — using fallback data:', err);
   }
 }
@@ -2675,9 +2673,6 @@ async function loadInitialData() {
 async function loadStudentData() {
   if (currentRole !== 'student' || !currentUser.id) return;
   try {
-    ATTENDANCE_LOG.length = 0;
-    SUBMISSIONS.length = 0;
-
     // Load student's own attendance from DB
     const attRes = await fetch(`${API_BASE}?resource=attendance`);
     const attData = await attRes.json();
@@ -2709,14 +2704,6 @@ async function loadStudentData() {
           morningTimeOutVerification: a.time_out_verification_status || 'Pending',
           afternoonTimeInVerification: a.afternoon_time_in_verification_status || 'Pending',
           afternoonTimeOutVerification: a.afternoon_time_out_verification_status || 'Pending',
-          timeInLocationStatus: a.time_in_location_status || '',
-          timeOutLocationStatus: a.time_out_location_status || '',
-          afternoonTimeInLocationStatus: a.afternoon_time_in_location_status || '',
-          afternoonTimeOutLocationStatus: a.afternoon_time_out_location_status || '',
-          timeInDistance: a.time_in_distance_meters,
-          timeOutDistance: a.time_out_distance_meters,
-          afternoonTimeInDistance: a.afternoon_time_in_distance_meters,
-          afternoonTimeOutDistance: a.afternoon_time_out_distance_meters,
           status: a.status || (a.time_in ? 'Present' : 'Absent'),
           remarks: a.remarks || ''
         });
@@ -2726,7 +2713,7 @@ async function loadStudentData() {
     // Load student's own submissions from DB
     const subRes = await fetch(`${API_BASE}?resource=submissions`);
     const subData = await subRes.json();
-    if (subData.success && Array.isArray(subData.submissions)) {
+    if (subData.success && Array.isArray(subData.submissions) && subData.submissions.length) {
       SUBMISSIONS.length = 0;
       subData.submissions.forEach(s => {
         SUBMISSIONS.push({
@@ -2935,13 +2922,7 @@ function navigateTo(page) {
     if (currentRole === 'student' && page === 'tasks' && typeof loadStudentTasks === 'function') {
       loadStudentTasks().then(() => {
         if (currentRole === 'student' && currentPage === 'tasks') {
-          // Refresh this page's task list once after the request completes.
-          // Calling navigateTo('tasks') here would start another task request,
-          // whose callback would navigate again, creating a render/request loop.
-          const tasksRenderer = PAGE_RENDERERS.student?.tasks;
-          if (typeof tasksRenderer === 'function') {
-            content.innerHTML = tasksRenderer();
-          }
+          navigateTo('tasks');
           if (window.STUDENT_TASK_FOCUS_ID) {
             setTimeout(() => focusStudentTask(window.STUDENT_TASK_FOCUS_ID), 50);
           }
@@ -3136,43 +3117,13 @@ function clearTaskBadge() {
   buildNav();
 }
 
-function getCurrentLocation() {
-  if (!navigator.geolocation) {
-    return Promise.reject(new Error('This browser does not support geolocation.'));
-  }
-
-  return new Promise((resolve, reject) => {
-    navigator.geolocation.getCurrentPosition(
-      (position) => resolve({
-        latitude: position.coords.latitude,
-        longitude: position.coords.longitude,
-        accuracy: position.coords.accuracy ?? null
-      }),
-      (error) => {
-        const messages = {
-          1: 'Location access is required to record your attendance. Please enable GPS/location permission and try again.',
-          2: 'Your location is unavailable. Turn on GPS/location services and try again.',
-          3: 'Getting your location timed out. Check GPS/location settings and try again.'
-        };
-        reject(new Error(messages[error.code] || 'Unable to access your location.'));
-      },
-      { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
-    );
-  });
-}
-
-async function recordAttendance(type, scanData, faceEncoding, location = pendingAttendanceLocation, eventType = pendingAttendanceEventType) {
+async function recordAttendance(type, scanData, faceEncoding, eventType = pendingAttendanceEventType) {
   const nextEvent = getNextStudentAttendanceEvent();
   const selectedEvent = eventType || nextEvent?.action;
   if (!nextEvent || selectedEvent !== nextEvent.action || nextEvent.type !== type) {
     alert('Attendance events must be recorded in the displayed order. Refresh the page and try again.');
     return false;
   }
-  if (!location) {
-    alert('Location access is required to record your attendance. Please enable GPS/location permission and try again.');
-    return false;
-  }
-
   const event = STUDENT_ATTENDANCE_EVENTS.find(item => item.action === selectedEvent);
   if (!event) return false;
 
@@ -3180,10 +3131,7 @@ async function recordAttendance(type, scanData, faceEncoding, location = pending
     const params = new URLSearchParams({
       action: selectedEvent,
       face_snapshot: scanData || '',
-      face_encoding: JSON.stringify(faceEncoding || []),
-      latitude: String(location.latitude),
-      longitude: String(location.longitude),
-      accuracy: String(location.accuracy ?? '')
+      face_encoding: JSON.stringify(faceEncoding || [])
     });
     const response = await fetch(`${API_BASE}?resource=attendance`, {
       method: 'POST',
@@ -3219,8 +3167,6 @@ async function recordAttendance(type, scanData, faceEncoding, location = pending
     if (selectedEvent === 'morning_time_out') todayEntry.timeOut = data.time;
     todayEntry[event.faceField] = scanData;
     todayEntry[event.verificationField] = 'Verified';
-    todayEntry[event.locationField] = data.location_status || 'Verified';
-    todayEntry[event.distanceField] = data.distance_meters;
     todayEntry.morningMinutes = data.morning_minutes;
     todayEntry.afternoonMinutes = data.afternoon_minutes;
     todayEntry.totalMinutes = Number(data.total_minutes) || 0;
@@ -4498,49 +4444,9 @@ async function openFaceModal(type, attendanceEventType = null) {
     faceRegistrationPending = false;
   }
   modal.classList.remove('hidden');
-  const requestId = ++attendanceLocationRequestId;
-  pendingAttendanceLocation = null;
-  if (type === 'register') {
-    startCamera(type);
-    return;
-  }
-
-  setFaceModalStatus('Getting your location…', 'info');
-  try {
-    const location = await getCurrentLocation();
-    if (requestId !== attendanceLocationRequestId) return;
-    setFaceModalStatus('Checking OJT location…', 'info');
-    const response = await fetch(`${API_BASE}?resource=attendance`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        action: 'validate_location',
-        latitude: String(location.latitude),
-        longitude: String(location.longitude),
-        accuracy: String(location.accuracy ?? '')
-      }).toString()
-    });
-    const result = await response.json();
-    if (!response.ok || !result.success) {
-      throw new Error(result.message || 'Unable to verify your OJT location.');
-    }
-    if (requestId !== attendanceLocationRequestId) return;
-    pendingAttendanceLocation = {
-      ...location,
-      distanceMeters: Number(result.distance_meters),
-      allowedRadiusMeters: Number(result.allowed_radius_meters)
-    };
-    setFaceModalStatus(`Location verified — ${Math.round(pendingAttendanceLocation.distanceMeters)} meters away. Starting face scan…`, 'success');
-    await startCamera(type);
-  } catch (error) {
-    if (requestId !== attendanceLocationRequestId) return;
-    pendingAttendanceLocation = null;
-    setFaceModalStatus(error.message || 'Unable to verify your location. Attendance was not recorded.', 'error');
-  }
+  startCamera(type);
 }
 function closeFaceModal() {
-  attendanceLocationRequestId++;
-  pendingAttendanceLocation = null;
   pendingAttendanceEventType = null;
   const modal = document.getElementById('face-modal');
   if (modal) {
@@ -4584,10 +4490,7 @@ async function startCamera(type) {
       await video.play().catch(() => {});
     }
     updateFaceValidationUI({ cameraConnected: true, message: 'Camera connected. Please position your face.' });
-    const locationStatus = type !== 'register' && pendingAttendanceLocation
-      ? `Location verified — ${Math.round(pendingAttendanceLocation.distanceMeters)} meters away. Scanning face…`
-      : '🔍 Scanning face…';
-    setFaceModalStatus(locationStatus, 'info');
+    setFaceModalStatus('🔍 Scanning face…', 'info');
     startFaceValidationLoop(video, type);
     if (type === 'register') {
       setFaceModalStatus('Camera ready. Capture your face, then save the registration.', 'info');
@@ -4625,7 +4528,7 @@ async function startCamera(type) {
       try {
         const descriptor = await getRealFaceDescriptor(readyFrame);
         setFaceModalStatus('✅ Face captured. Verifying…', 'success');
-        const attendanceSaved = await recordAttendance(type, readyFrame, descriptor, pendingAttendanceLocation, pendingAttendanceEventType);
+        const attendanceSaved = await recordAttendance(type, readyFrame, descriptor, pendingAttendanceEventType);
         logFaceAttempt(type, attendanceSaved ? 'success' : 'failed', attendanceSaved ? 'Face verified' : 'Attendance event was not recorded', { attendanceType: pendingAttendanceEventType || type });
         if (attendanceSaved) {
           setTimeout(() => {
@@ -4823,6 +4726,8 @@ async function loadAdminCompanyPage(page = 1, search = '') {
   if (window.__companyLoadedKey === requestKey) return true;
   if (window.__companyPageRequest?.key === requestKey) return window.__companyPageRequest.promise;
 
+  window.__companyPageLoading = true;
+  window.__companyPageError = '';
   const request = (async () => {
     try {
       const params = new URLSearchParams({
@@ -4833,7 +4738,9 @@ async function loadAdminCompanyPage(page = 1, search = '') {
       });
       const response = await fetch(`${API_BASE}?${params.toString()}`, { cache: 'no-store' });
       const data = await response.json();
-      if (!data.success || !Array.isArray(data.companies)) return false;
+      if (!response.ok || !data.success || !Array.isArray(data.companies)) {
+        throw new Error(data.message || 'Unable to load companies.');
+      }
 
       ADMIN_COMPANY_PAGE_RECORDS = data.companies.map((company) => ({
         ...company,
@@ -4853,12 +4760,16 @@ async function loadAdminCompanyPage(page = 1, search = '') {
       window.__companyTotalPages = Math.max(1, Number(pagination.total_pages) || 1);
       window.__companySearch = normalizedSearch;
       window.__companyLoadedKey = `${normalizedSearch}\u0000${window.__companyPage}`;
+      window.__companyPageLoading = false;
       if (currentPage === 'companies' && typeof updateAdminCompanyPageDom === 'function' && updateAdminCompanyPageDom()) {
         return true;
       }
       if (currentPage === 'companies') navigateTo('companies');
       return true;
     } catch (error) {
+      window.__companyPageLoading = false;
+      window.__companyPageError = error.message || 'Unable to load companies.';
+      if (currentPage === 'companies' && typeof updateAdminCompanyPageDom === 'function') updateAdminCompanyPageDom();
       console.warn('Failed to load paginated company list:', error);
       return false;
     }
@@ -4909,7 +4820,7 @@ function editCompany(companyOrIndex) {
     <div class="form-row"><label class="form-label">Email</label><input class="form-input" id="gen-company-email" type="email" value="${escapeHtml(company.contact_email || company.email || '')}"></div>
     <div class="form-row"><label class="form-label">Status</label><select class="form-select" id="gen-company-status"><option value="Active" ${company.status==='Active'?'selected':''}>Active</option><option value="Inactive" ${company.status==='Inactive'?'selected':''}>Inactive</option></select></div>
   `;
-  openGenModal('Edit Company', body, async () => saveCompany('edit', index), 'Save Company');
+  openGenModal('Edit Company', body, async () => saveCompany('edit', company), 'Save Company');
 }
 
 async function saveCompany(mode, index = null) {
@@ -4966,7 +4877,7 @@ async function saveCompany(mode, index = null) {
     await refreshCompanyList();
     logAdminActivity(mode === 'edit' ? 'Update' : 'Create', `${mode === 'edit' ? 'Updated company' : 'Added company'} "${name}".`);
     addNotification(mode === 'edit' ? `Company updated: ${name}` : `Company added: ${name}`, 'success');
-    showCompanySuccessToast('Company added successfully!');
+    showCompanySuccessToast(mode === 'edit' ? 'Company updated successfully!' : 'Company added successfully!');
 
     if (currentPage === 'companies') await loadAdminCompanyPage(window.__companyPage || 1, window.__companySearch || '');
     return true;

@@ -2,47 +2,13 @@
 
 function getDbConfig(): array
 {
-    $config = [
+    return [
         'host' => '127.0.0.1',
         'dbname' => 'bisu_internship_tracker',
         'user' => 'root',
         'pass' => '',
         'charset' => 'utf8mb4',
     ];
-
-    // Keep machine- and host-specific credentials out of version control.
-    // db.local.php is intentionally ignored by Git and may return any or all
-    // of the keys above.
-    $localConfigPath = __DIR__ . '/db.local.php';
-    if (is_file($localConfigPath)) {
-        $localConfig = require $localConfigPath;
-        if (!is_array($localConfig)) {
-            throw new RuntimeException('Database configuration must return an array.');
-        }
-        foreach (array_keys($config) as $key) {
-            if (array_key_exists($key, $localConfig)) {
-                $config[$key] = (string) $localConfig[$key];
-            }
-        }
-    }
-
-    // Environment variables are useful on managed hosting and take priority
-    // over the local configuration file when provided.
-    $environmentKeys = [
-        'host' => 'DB_HOST',
-        'dbname' => 'DB_NAME',
-        'user' => 'DB_USER',
-        'pass' => 'DB_PASS',
-        'charset' => 'DB_CHARSET',
-    ];
-    foreach ($environmentKeys as $key => $environmentKey) {
-        $value = getenv($environmentKey);
-        if ($value !== false && $value !== '') {
-            $config[$key] = $value;
-        }
-    }
-
-    return $config;
 }
 
 function getDbConnection(bool $initializeSchema = true, bool $createMissingDatabase = true): PDO
@@ -698,6 +664,46 @@ function initializeDatabase(PDO $pdo): void
         $stmt->execute(['Code Review Task', 'Ryan', 'May 5', '0/1', 'Not Started']);
     }
 
+    // Seed companies
+    $companies = $pdo->query('SELECT COUNT(*) AS count FROM companies')->fetch();
+    if ($companies && intval($companies['count']) === 0) {
+        $stmt = $pdo->prepare('INSERT INTO companies (name, location, contact_email, status) VALUES (?, ?, ?, ?)');
+        $stmt->execute(['Tech Solutions Inc.', 'Calape, Bohol', 'ojt@techsolutions.ph', 'Active']);
+        $stmt->execute(['Innovatech Global', 'Tagbilaran City', 'contact@innovatech.ph', 'Active']);
+        $stmt->execute(['Island Digital Hub', 'Panglao, Bohol', 'info@islanddigital.ph', 'Active']);
+        $stmt->execute(['Cebu Softworks', 'Cebu City', 'hr@cebusoftworks.ph', 'Active']);
+    }
+
+    // Seed relationships for the built-in accounts without changing existing assignments.
+    $assignments = $pdo->query('SELECT COUNT(*) AS count FROM assignments')->fetch();
+    if ($assignments && intval($assignments['count']) === 0) {
+        $studentStmt = $pdo->query("SELECT id, student_id FROM users WHERE role='student' AND status='Active' ORDER BY id ASC");
+        $studentRows = $studentStmt->fetchAll();
+        $supervisorId = $pdo->query("SELECT id FROM users WHERE role='supervisor' AND status='Active' ORDER BY id ASC LIMIT 1")->fetchColumn();
+        $coordinatorId = $pdo->query("SELECT id FROM users WHERE role='coordinator' AND status='Active' ORDER BY id ASC LIMIT 1")->fetchColumn();
+        $companyId = $pdo->query("SELECT id FROM companies WHERE name='Tech Solutions Inc.' LIMIT 1")->fetchColumn();
+        $schoolYearId = $pdo->query("SELECT id FROM school_years WHERE status='Active' ORDER BY id DESC LIMIT 1")->fetchColumn();
+        if ($supervisorId && $coordinatorId && $companyId) {
+            $assignmentStmt = $pdo->prepare(
+                'INSERT INTO assignments (student_id, company_id, supervisor_id, coordinator_id, school_year_id, program_code, internship_status, hours_completed, hours_required)
+                 SELECT ?, ?, ?, ?, ?, program, ?, ?, ? FROM users WHERE id = ?'
+            );
+            foreach ($studentRows as $index => $student) {
+                $assignmentStmt->execute([
+                    $student['id'],
+                    $companyId,
+                    $supervisorId,
+                    $coordinatorId,
+                    $schoolYearId ?: null,
+                    $index === 0 ? 'Ongoing' : 'Pending',
+                    $index === 0 ? 312 : 0,
+                    500,
+                    $student['id'],
+                ]);
+            }
+        }
+    }
+
     // Ensure username and role-specific columns exist for older installations
     try {
         $schemaColumns = [
@@ -1009,13 +1015,12 @@ function setCoordinatorCompanyAssignments(PDO $pdo, int $coordinatorId, array $c
     }
     $ids = array_values(array_unique($ids));
 
+    $pdo->prepare('DELETE FROM coordinator_company WHERE coordinator_id = ?')->execute([$coordinatorId]);
+    $pdo->prepare('DELETE FROM coordinator_company_assignments WHERE coordinator_id = ?')->execute([$coordinatorId]);
     if ($ids === []) {
         return;
     }
 
-    // Keep existing coordinator-company assignments intact and only add new
-    // company relationships. This preserves the first assigned company while
-    // allowing additional companies to be added without replacing old ones.
     $insert = $pdo->prepare('INSERT IGNORE INTO coordinator_company (coordinator_id, company_id) VALUES (?, ?)');
     $compatInsert = $pdo->prepare('INSERT IGNORE INTO coordinator_company_assignments (coordinator_id, company_id) VALUES (?, ?)');
     foreach ($ids as $companyId) {

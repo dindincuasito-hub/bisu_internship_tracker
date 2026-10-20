@@ -1,8 +1,8 @@
 ﻿const STUDENT_ATTENDANCE_EVENTS = [
-  { action: 'morning_time_in', field: 'morningTimeIn', legacyField: 'timeIn', type: 'in', label: 'Morning Time In', faceField: 'faceInImage', verificationField: 'morningTimeInVerification', locationField: 'timeInLocationStatus', distanceField: 'timeInDistance' },
-  { action: 'morning_time_out', field: 'morningTimeOut', legacyField: 'timeOut', type: 'out', label: 'Morning Time Out', faceField: 'faceOutImage', verificationField: 'morningTimeOutVerification', locationField: 'timeOutLocationStatus', distanceField: 'timeOutDistance' },
-  { action: 'afternoon_time_in', field: 'afternoonTimeIn', type: 'in', label: 'Afternoon Time In', faceField: 'afternoonFaceInImage', verificationField: 'afternoonTimeInVerification', locationField: 'afternoonTimeInLocationStatus', distanceField: 'afternoonTimeInDistance' },
-  { action: 'afternoon_time_out', field: 'afternoonTimeOut', type: 'out', label: 'Afternoon Time Out', faceField: 'afternoonFaceOutImage', verificationField: 'afternoonTimeOutVerification', locationField: 'afternoonTimeOutLocationStatus', distanceField: 'afternoonTimeOutDistance' },
+  { action: 'morning_time_in', field: 'morningTimeIn', legacyField: 'timeIn', type: 'in', label: 'Morning Time In', faceField: 'faceInImage', verificationField: 'morningTimeInVerification' },
+  { action: 'morning_time_out', field: 'morningTimeOut', legacyField: 'timeOut', type: 'out', label: 'Morning Time Out', faceField: 'faceOutImage', verificationField: 'morningTimeOutVerification' },
+  { action: 'afternoon_time_in', field: 'afternoonTimeIn', type: 'in', label: 'Afternoon Time In', faceField: 'afternoonFaceInImage', verificationField: 'afternoonTimeInVerification' },
+  { action: 'afternoon_time_out', field: 'afternoonTimeOut', type: 'out', label: 'Afternoon Time Out', faceField: 'afternoonFaceOutImage', verificationField: 'afternoonTimeOutVerification' },
 ];
 
 function getStudentAttendanceEventStates(entry) {
@@ -18,8 +18,6 @@ function getStudentAttendanceEventStates(entry) {
       completed,
       available,
       verification: entry?.[event.verificationField] || entry?.verification || 'Pending',
-      locationStatus: entry?.[event.locationField] || '',
-      distanceMeters: entry?.[event.distanceField],
       faceImage: entry?.[event.faceField] || '',
     };
   });
@@ -64,16 +62,13 @@ function getStudentAttendanceHours(entry) {
 
 function renderStudentAttendanceEventLog(entry) {
   return getStudentAttendanceEventStates(entry).map(event => {
-    const gps = event.locationStatus === 'Verified'
-      ? `GPS verified${Number.isFinite(Number(event.distanceMeters)) ? ` · ${Math.round(Number(event.distanceMeters))} m` : ''}`
-      : (event.locationStatus || 'GPS pending');
     const evidence = event.faceImage
       ? `<img loading="lazy" src="${escapeHtml(event.faceImage)}" class="attendance-face-thumb" alt="${escapeHtml(event.label)} face capture">`
       : '';
     return `<div style="display:grid;grid-template-columns:minmax(120px,1fr) auto;gap:2px 12px;padding:6px 0">
       <strong>${escapeHtml(event.label)}</strong>
       <span>${event.completed ? escapeHtml(formatAttendanceTime(event.timestamp)) : '—'}</span>
-      <small style="color:var(--text3)">${event.completed ? `${escapeHtml(event.verification)} · ${escapeHtml(gps)}` : 'Not recorded'}</small>
+      <small style="color:var(--text3)">${event.completed ? escapeHtml(event.verification) : 'Not recorded'}</small>
       <span>${evidence}</span>
     </div>`;
   }).join('');
@@ -81,10 +76,7 @@ function renderStudentAttendanceEventLog(entry) {
 
 function renderStudentAttendanceEventCell(event) {
   if (!event.completed) return '—';
-  const gps = event.locationStatus === 'Verified'
-    ? `GPS verified${Number.isFinite(Number(event.distanceMeters)) ? ` · ${Math.round(Number(event.distanceMeters))} m` : ''}`
-    : (event.locationStatus || 'GPS pending');
-  return `<strong>${escapeHtml(formatAttendanceTime(event.timestamp))}</strong><br><small>${escapeHtml(event.verification)}</small><br><small>${escapeHtml(gps)}</small>`;
+  return `<strong>${escapeHtml(formatAttendanceTime(event.timestamp))}</strong><br><small>${escapeHtml(event.verification)}</small>`;
 }
 
 function getStudentAttendanceStats() {
@@ -332,11 +324,6 @@ PAGE_RENDERERS.student = {
     const program = account.program || 'Not set';
     const section = account.section || 'Not set';
     const academicYear = account.academic_year || 'Not set';
-    const assignmentValue = (value) => String(value || '').trim() || 'Not yet assigned.';
-    const companyName = assignmentValue(account.company_name);
-    const supervisorName = assignmentValue(account.supervisor_name);
-    const coordinatorName = assignmentValue(account.coordinator_name);
-    const companyLocation = assignmentValue(account.company_location);
     return `
       <div class="section-head"></div>
       <div class="two-col mb-24">
@@ -365,13 +352,14 @@ PAGE_RENDERERS.student = {
             <div class="profile-info-section">
               <div style="font-size:48px;text-align:center;margin-bottom:16px;background:var(--surface2);padding:20px;border-radius:12px;color:var(--blue)">🏢</div>
               <div style="text-align:center;margin-bottom:24px">
-                <div style="font-size:16px;font-weight:700;color:var(--text)">${escapeHtml(companyName)}</div>
+                <div style="font-size:16px;font-weight:700;color:var(--text)">Tech Solutions Inc.</div>
                 <div style="font-size:13px;color:var(--text3)">Host Company</div>
               </div>
               <div style="border-top:1px solid var(--border);padding-top:16px">
-                <div class="info-row"><span style="color:var(--text3);font-size:12px">👔 Supervisor</span><div style="font-weight:600">${escapeHtml(supervisorName)}</div></div>
-                <div class="info-row"><span style="color:var(--text3);font-size:12px">🎯 Coordinator</span><div style="font-weight:600">${escapeHtml(coordinatorName)}</div></div>
-                <div class="info-row"><span style="color:var(--text3);font-size:12px">📍 Location</span><div style="font-weight:600">${escapeHtml(companyLocation)}</div></div>
+                <div class="info-row"><span style="color:var(--text3);font-size:12px">👔 Supervisor</span><div style="font-weight:600">Maria Santos (Supervisor)</div></div>
+                <div class="info-row"><span style="color:var(--text3);font-size:12px">🎯 Coordinator</span><div style="font-weight:600">Ma. Elena Santos</div></div>
+                <div class="info-row"><span style="color:var(--text3);font-size:12px">📍 Location</span><div style="font-weight:600">TechHub Building, Cebu City</div></div>
+                <div class="info-row"><span style="color:var(--text3);font-size:12px">📞 Hotline</span><div style="font-weight:600">(032) 123-4567</div></div>
               </div>
             </div>
           </div>

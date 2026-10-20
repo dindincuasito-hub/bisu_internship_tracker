@@ -18,6 +18,7 @@ function getReportsFilters() {
 
 function getFilteredReportRows() {
   const filters = getReportsFilters();
+
   return INTERNSHIPS
     .map((internship) => {
       const student = ADMIN_STUDENTS.find((item) => item.name === internship.studentName) || {};
@@ -102,6 +103,7 @@ function initAdminCompanySearch() {
 }
 
 function getAdminCompanyRowsMarkup(companies, startIndex) {
+  if (window.__companyPageLoading) return '<tr><td colspan="8" style="text-align:center;padding:24px;color:var(--text3)">Loading companies...</td></tr>';
   return companies.length ? companies.map((company, rowIndex) => {
     const statusClass = company.status === 'Active' ? 'tag-green' : 'tag-gray';
     return `<tr>
@@ -118,7 +120,7 @@ function getAdminCompanyRowsMarkup(companies, startIndex) {
         <button type="button" class="btn btn-outline btn-sm" title="Delete" aria-label="Delete" style="display:inline-flex;align-items:center;justify-content:center;padding:5px;width:32px;height:32px;border-radius:8px;transition:all 0.2s ease;" onclick="deleteCompany(ADMIN_COMPANY_PAGE_RECORDS[${rowIndex}])"><i class="bi bi-trash-fill" aria-hidden="true"></i></button>
       </div></td>
     </tr>`;
-  }).join('') : '<tr><td colspan="8" style="text-align:center;padding:24px;color:var(--text3)">No companies found.</td></tr>';
+  }).join('') : `<tr><td colspan="8" style="text-align:center;padding:24px;color:var(--text3)">${escapeHtml(window.__companyPageError || 'No companies found.')}</td></tr>`;
 }
 
 function getAdminCompanyPaginationMarkup(page, totalPages) {
@@ -179,39 +181,19 @@ async function loadAdminProfile() {
       throw new Error(data.message || 'Unable to load your profile.');
     }
     if (currentRole !== 'admin' || currentPage !== 'profile') return;
-
-    applyAdminProfile(data.profile);
+    currentUser = { ...currentUser, ...data.profile };
+    document.getElementById('admin-profile-name').value = data.profile.name || '';
+    document.getElementById('admin-profile-email').value = data.profile.email || '';
   } catch (error) {
-    setAdminProfileMessage(error.message || 'Unable to load your profile.', true);
+    alert(error.message || 'Unable to load your profile.');
   }
-}
-
-function applyAdminProfile(profile) {
-  if (!profile || typeof profile !== 'object') return;
-
-  currentUser = { ...currentUser, ...profile };
-
-  // The admin profile form intentionally exposes only name and email.  Do not
-  // write to fields that are not part of this page; it is rendered dynamically
-  // and may also have been replaced while this request was in flight.
-  const nameInput = document.getElementById('admin-profile-name');
-  const emailInput = document.getElementById('admin-profile-email');
-  if (nameInput) nameInput.value = profile.name || '';
-  if (emailInput) emailInput.value = profile.email || '';
-}
-
-function setAdminProfileMessage(message, isError = false, target = 'admin-profile-message') {
-  const element = document.getElementById(target);
-  if (!element) return;
-  element.textContent = message;
-  element.style.color = isError ? 'var(--danger, #c0392b)' : 'var(--success, #237a45)';
 }
 
 async function saveAdminProfile() {
   const name = document.getElementById('admin-profile-name')?.value.trim() || '';
   const email = document.getElementById('admin-profile-email')?.value.trim() || '';
   if (!name || !email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    setAdminProfileMessage('Enter your name and a valid email address.', true);
+    alert('Enter your name and a valid email address.');
     return;
   }
 
@@ -219,49 +201,58 @@ async function saveAdminProfile() {
     const response = await fetch(`${API_BASE}?resource=profile`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, email })
+      body: JSON.stringify({ name, email, contact: currentUser.contact || '' })
     });
     const data = await response.json();
     if (!response.ok || !data.success) throw new Error(data.message || 'Unable to save your profile.');
-    applyAdminProfile(data.profile || { name, email });
-    setAdminProfileMessage(data.message || 'Profile updated successfully.');
+    currentUser = { ...currentUser, name, email };
+    alert(data.message || 'Profile updated successfully.');
   } catch (error) {
-    setAdminProfileMessage(error.message || 'Unable to save your profile.', true);
+    alert(error.message || 'Unable to save your profile.');
   }
 }
 
-async function saveAdminPassword() {
-  const currentPassword = document.getElementById('admin-current-password')?.value || '';
+function saveAdminPassword() {
   const newPassword = document.getElementById('admin-new-password')?.value || '';
   const confirmPassword = document.getElementById('admin-confirm-password')?.value || '';
-  if (!currentPassword || !newPassword || !confirmPassword) {
-    setAdminProfileMessage('Complete all password fields.', true, 'admin-password-message');
+  if (!newPassword || !confirmPassword) {
+    alert('Enter and confirm your new password.');
     return;
   }
   if (newPassword.length < 8) {
-    setAdminProfileMessage('New password must be at least 8 characters long.', true, 'admin-password-message');
+    alert('New password must be at least 8 characters long.');
     return;
   }
   if (newPassword !== confirmPassword) {
-    setAdminProfileMessage('New password and confirmation do not match.', true, 'admin-password-message');
+    alert('New password and confirmation do not match.');
     return;
   }
 
-  try {
-    const response = await fetch(`${API_BASE}?resource=profile`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ current_password: currentPassword, new_password: newPassword, confirm_password: confirmPassword })
-    });
-    const data = await response.json();
-    if (!response.ok || !data.success) throw new Error(data.message || 'Unable to change your password.');
-    document.getElementById('admin-current-password').value = '';
-    document.getElementById('admin-new-password').value = '';
-    document.getElementById('admin-confirm-password').value = '';
-    setAdminProfileMessage(data.message || 'Password updated successfully.', false, 'admin-password-message');
-  } catch (error) {
-    setAdminProfileMessage(error.message || 'Unable to change your password.', true, 'admin-password-message');
-  }
+  openGenModal('Confirm Current Password', `
+    <div class="form-row"><label class="form-label" for="admin-current-password">Current Password</label><input class="form-input" id="admin-current-password" type="password" autocomplete="current-password" required></div>
+  `, async () => {
+    const currentPassword = document.getElementById('admin-current-password')?.value || '';
+    if (!currentPassword) {
+      alert('Enter your current password to continue.');
+      return false;
+    }
+    try {
+      const response = await fetch(`${API_BASE}?resource=profile`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ current_password: currentPassword, new_password: newPassword, confirm_password: confirmPassword })
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.message || 'Unable to change your password.');
+      document.getElementById('admin-new-password').value = '';
+      document.getElementById('admin-confirm-password').value = '';
+      alert(data.message || 'Password updated successfully.');
+      return true;
+    } catch (error) {
+      alert(error.message || 'Unable to change your password.');
+      return false;
+    }
+  }, 'Change Password');
 }
 
 function initAdminLogsPage() {
@@ -348,7 +339,7 @@ function changeAdminLogsPage(delta) {
   const adminModule = {
     dashboard: () => `
       <div class="breadcrumb">Admin Panel › Dashboard</div>
-      <div style="margin-bottom:16px"><span class="tag tag-green">SY 2024–2025 • Active</span></div>
+      <div style="margin-bottom:16px"><span class="tag tag-green">${SCHOOL_YEARS.some(year => year.status === 'Active') ? `SY ${escapeHtml(SCHOOL_YEARS.find(year => year.status === 'Active').year)} • Active` : 'No active academic year'}</span></div>
       <div class="stats-row cols4">
         <div class="stat-card blue"><div class="stat-icon">🎓</div><div class="stat-val">${DASHBOARD_STATS.total_students}</div><div class="stat-label">Total Students</div></div>
         <div class="stat-card green"><div class="stat-icon">🏢</div><div class="stat-val">${DASHBOARD_STATS.total_companies}</div><div class="stat-label">Companies</div></div>
@@ -375,13 +366,9 @@ function changeAdminLogsPage(delta) {
         <div class="card">
           <div class="card-header"><div class="card-title">Recent Activities</div></div>
           <div class="card-body">
-            ${[
-              { event: 'New internship application received', time: '8:02 AM', icon: '📁' },
-              { event: 'Student account updated', time: '9:15 AM', icon: '🎓' },
-              { event: 'Coordinator assigned to program', time: '10:30 AM', icon: '👩‍💼' },
-              { event: 'Company profile updated', time: '11:00 AM', icon: '🏢' },
-              { event: 'Internship completion cleared', time: '1:45 PM', icon: '✅' }
-            ].map(e => `<div class="log-item"><div class="log-icon in" style="width:32px;height:32px">${e.icon}</div><div><div style="font-size:13px">${e.event}</div><div style="font-size:11px;color:var(--text3)">${e.time}</div></div></div>`).join('')}
+            ${ADMIN_RECENT_ACTIVITIES.length
+              ? ADMIN_RECENT_ACTIVITIES.map(activity => `<div class="log-item"><div class="log-icon in" style="width:32px;height:32px">${activity.icon}</div><div><div style="font-size:13px">${escapeHtml(activity.event)}</div><div style="font-size:11px;color:var(--text3)">${escapeHtml(activity.time)}</div></div></div>`).join('')
+              : '<div style="padding:12px 0;color:var(--text3);font-size:13px">No recent activity.</div>'}
           </div>
         </div>
       </div>` ,
@@ -548,7 +535,7 @@ function changeAdminLogsPage(delta) {
             <div class="form-row"><label class="form-label">Company</label><select id="reports-company" class="form-select"><option>All Companies</option>${ADMIN_COMPANIES.map(c => `<option>${c.name}</option>`).join('')}</select></div>
             <div class="form-row"><label class="form-label">Coordinator</label><select id="reports-coordinator" class="form-select"><option>All Coordinators</option>${COORDINATORS.map(c => `<option>${c.name}</option>`).join('')}</select></div>
             <div class="form-row"><label class="form-label">Supervisor</label><select id="reports-supervisor" class="form-select"><option>All Supervisors</option>${SUPERVISORS.map(s => `<option>${s.name}</option>`).join('')}</select></div>
-            <div class="form-row"><label class="form-label">Internship Status</label><select id="reports-status" class="form-select"><option value="All" selected>All</option><option value="Pending">Pending</option><option value="Ongoing">Ongoing</option><option value="Completed">Completed</option></select></div>
+            <div class="form-row"><label class="form-label">Internship Status</label><select id="reports-status" class="form-select"><option value="All" selected>All</option><option value="Pending">Pending</option><option value="Approved">Approved</option><option value="Ongoing">Ongoing</option><option value="Completed">Completed</option></select></div>
           </div>
         </div>
       </div>
@@ -601,17 +588,14 @@ function changeAdminLogsPage(delta) {
             <div class="form-row"><label class="form-label" for="admin-profile-email">Email</label><input class="form-input" id="admin-profile-email" type="email" maxlength="160" value="${escapeHtml(currentUser.email || '')}" required></div>
             <div class="form-row"><label class="form-label">Role</label><input class="form-input" type="text" value="Administrator" disabled></div>
             <button class="btn btn-primary" type="button" onclick="saveAdminProfile()">Update Profile</button>
-            <div id="admin-profile-message" role="status" aria-live="polite" style="margin-top:12px"></div>
           </div>
         </div>
         <div class="card">
           <div class="card-header"><div class="card-title">Security</div></div>
           <div class="card-body">
-            <div class="form-row"><label class="form-label" for="admin-current-password">Current Password</label><input class="form-input" id="admin-current-password" type="password" autocomplete="current-password"></div>
-            <div class="form-row"><label class="form-label" for="admin-new-password">New Password</label><input class="form-input" id="admin-new-password" type="password" autocomplete="new-password" minlength="8"></div>
-            <div class="form-row"><label class="form-label" for="admin-confirm-password">Confirm Password</label><input class="form-input" id="admin-confirm-password" type="password" autocomplete="new-password" minlength="8"></div>
+            <div class="form-row"><label class="form-label" for="admin-new-password">Change Password</label><input class="form-input" id="admin-new-password" type="password" placeholder="New password" autocomplete="new-password" minlength="8"></div>
+            <div class="form-row"><label class="form-label" for="admin-confirm-password">Confirm Password</label><input class="form-input" id="admin-confirm-password" type="password" placeholder="Confirm password" autocomplete="new-password" minlength="8"></div>
             <button class="btn btn-primary" type="button" onclick="saveAdminPassword()">Save Password</button>
-            <div id="admin-password-message" role="status" aria-live="polite" style="margin-top:12px"></div>
           </div>
         </div>
       </div>` ,

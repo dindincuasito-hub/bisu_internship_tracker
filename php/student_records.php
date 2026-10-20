@@ -41,7 +41,6 @@ try {
                     WHEN fr.registration_status = "Registered"
                          AND attendance_today.time_in IS NOT NULL
                          AND attendance_today.verification_status = "Verified"
-                         AND attendance_today.time_in_location_status = "Verified"
                     THEN attendance_today.status
                     ELSE "Absent"
                 END AS attendance_summary,
