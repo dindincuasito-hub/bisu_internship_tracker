@@ -4,8 +4,20 @@ php/db.local.php
 .env.*
 !.env.example
 
-# User-generated content
-uploads/
+# Uploads / user media (keep folders, ignore uploaded contents)
+uploads/faces/*
+uploads/face_registrations/*
+uploads/submissions/*
+!uploads/**/.gitkeep
+
+# Temporary / Scratch scripts
+scratch/
+tmp_face_test.php
+
+# Python & Environment cache
+__pycache__/
+*.py[cod]
+venv/
 
 # Editor and OS files
 .vscode/

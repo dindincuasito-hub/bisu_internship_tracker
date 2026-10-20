@@ -328,6 +328,8 @@ $contentType = $_SERVER['CONTENT_TYPE'] ?? '';
 if (strpos($contentType, 'application/json') !== false) {
     $raw = file_get_contents('php://input');
     $body = json_decode($raw, true) ?: [];
+} elseif (in_array($method, ['PUT', 'DELETE'], true)) {
+    parse_str(file_get_contents('php://input'), $body);
 } else {
     $body = $_POST;
 }
@@ -366,6 +368,7 @@ if (strpos($contentType, 'application/json') !== false) {
         $eventAction = trim($body['action'] ?? '');
         $description = trim($body['description'] ?? '');
         if (!in_array($eventAction, $allowedActions, true) || $description === '') sendError('Invalid activity event.');
+        if (in_array($eventAction, ['Database Backup', 'Database Restore'], true)) requireRole($user, ['admin']);
         logActivity($pdo, (int)$user['id'], $eventAction, $description);
         send(['success' => true, 'message' => 'Activity recorded.']);
     }
@@ -2107,33 +2110,6 @@ if ($resource === 'student_records') {
     }
 }
 
-// =====================================================
-// INIT — aggregated bootstrap data for JS loadInitialData()
-// Returns: school_years, programs, companies, supervisors, coordinators
-// No auth required — data is non-sensitive reference data
-// =====================================================
-if ($resource === 'init') {
-    $syStmt = $pdo->query('SELECT id, year_label, semester, start_date, end_date, students_count, status FROM school_years ORDER BY id DESC LIMIT 20');
-    $progStmt = $pdo->query("SELECT p.id, p.code, p.name, p.req_hours, p.students_count, p.coordinator,
-        COALESCE(GROUP_CONCAT(DISTINCT u.name ORDER BY u.name SEPARATOR ', '), 'Unassigned') AS coordinator_name
-        FROM programs p
-        LEFT JOIN users u ON u.program_id = p.id AND u.role = 'coordinator' AND u.status = 'Active'
-        GROUP BY p.id
-        ORDER BY p.code ASC");
-    $compStmt = $pdo->query('SELECT id, name, location, contact_email, contact_phone, status FROM companies WHERE status="Active" ORDER BY name ASC');
-    $supStmt = $pdo->query('SELECT u.id, u.name, u.email, u.contact, u.company_id, COALESCE(c.name, u.company) AS company, u.status FROM users u LEFT JOIN companies c ON c.id = u.company_id WHERE u.role="supervisor" AND u.status="Active" ORDER BY u.name ASC');
-    $coordStmt = $pdo->query('SELECT u.id, u.name, u.email, u.employee_id, u.program_id, COALESCE(p.name, p.code, u.program) AS program, u.status FROM users u LEFT JOIN programs p ON p.id = u.program_id WHERE u.role="coordinator" AND u.status="Active" ORDER BY u.name ASC');
-
-    $programRows = attachProgramStudents($pdo, $progStmt->fetchAll());
-    send([
-        'success'      => true,
-        'school_years' => $syStmt->fetchAll(),
-        'programs'     => $programRows,
-        'companies'    => $compStmt->fetchAll(),
-        'supervisors'  => $supStmt->fetchAll(),
-        'coordinators' => $coordStmt->fetchAll(),
-    ]);
-}
 
 // Fallback
 sendError('Unknown resource: ' . htmlspecialchars($resource), 404);

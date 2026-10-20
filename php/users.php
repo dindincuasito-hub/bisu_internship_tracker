@@ -38,7 +38,7 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 }
 
 $action = trim($_POST['action'] ?? 'create');
-$allowedRoles = ['student', 'coordinator', 'supervisor', 'admin'];
+$allowedRoles = ['student', 'coordinator', 'supervisor'];
 
 function sendError(int $status, string $message): void
 {
@@ -86,11 +86,28 @@ switch ($action) {
         if ($email === '') {
             $email = deriveAccountEmail($username, $name);
         }
+        if (strlen($name) > 120 || strlen($username) > 100 || strlen($email) > 160 || !filter_var($email, FILTER_VALIDATE_EMAIL)
+            || strlen($contact) > 100 || strlen($studentId) > 50 || strlen($section) > 50 || strlen($academicYear) > 50
+            || strlen($employeeId) > 50) {
+            sendError(400, 'One or more account fields are invalid or too long.');
+        }
+        if (strlen($password) < 8) {
+            sendError(400, 'Password must be at least 8 characters long.');
+        }
         if ($password !== $confirm) {
             sendError(400, 'Password and Confirm Password must match.');
         }
         if (!in_array($role, $allowedRoles, true)) {
             sendError(400, 'Invalid role selected.');
+        }
+        if (in_array($role, ['coordinator', 'supervisor'], true)) {
+            $selectedCompanyIds = $role === 'coordinator' ? $companyIds : ($companyId > 0 ? [$companyId] : []);
+            if ($selectedCompanyIds === []) sendError(400, 'An active company is required for this account.');
+            $activeCompanyCheck = $pdo->prepare('SELECT id FROM companies WHERE id = ? AND status = "Active" LIMIT 1');
+            foreach (array_unique($selectedCompanyIds) as $selectedCompanyId) {
+                $activeCompanyCheck->execute([(int)$selectedCompanyId]);
+                if (!$activeCompanyCheck->fetchColumn()) sendError(400, 'Selected company is not active or does not exist.');
+            }
         }
         if ($role === 'coordinator' || $role === 'student') {
             if ($programId <= 0 && $program !== '') {
@@ -148,8 +165,14 @@ switch ($action) {
         if (emailExists($pdo, $email)) {
             sendError(409, 'That email is already in use.');
         }
+        if ($role === 'student' && $studentId !== '') {
+            $studentIdCheck = $pdo->prepare('SELECT id FROM users WHERE role = "student" AND student_id = ? LIMIT 1');
+            $studentIdCheck->execute([$studentId]);
+            if ($studentIdCheck->fetch()) sendError(409, 'That Student ID is already in use.');
+        }
 
         $previousCompanyId = 0;
+        $pdo->beginTransaction();
         try {
             $userId = createUser(
                 $pdo,
@@ -188,10 +211,13 @@ switch ($action) {
             }
             $roleLabel = ucfirst($role);
             logActivity($pdo, (int)getSessionUser()['id'], 'Create ' . $roleLabel, 'Created ' . strtolower($roleLabel) . ' account for ' . $name . '.');
+            $pdo->commit();
             echo json_encode(['success' => true, 'message' => 'Account created successfully.', 'user_id' => $userId]);
             exit;
-        } catch (Exception $e) {
-            sendError(500, 'Unable to create account: ' . $e->getMessage());
+        } catch (Throwable $e) {
+            if ($pdo->inTransaction()) $pdo->rollBack();
+            error_log('[users] Account creation failed: ' . $e->getMessage());
+            sendError(500, 'Unable to create account.');
         }
         break;
 
@@ -228,8 +254,22 @@ switch ($action) {
         if ($email === '') {
             $email = deriveAccountEmail($username, $name);
         }
+        if (strlen($name) > 120 || strlen($username) > 100 || strlen($email) > 160 || !filter_var($email, FILTER_VALIDATE_EMAIL)
+            || strlen($contact) > 100 || strlen($studentId) > 50 || strlen($section) > 50 || strlen($academicYear) > 50
+            || strlen($employeeId) > 50) {
+            sendError(400, 'One or more account fields are invalid or too long.');
+        }
         if (!in_array($role, $allowedRoles, true)) {
             sendError(400, 'Invalid role selected.');
+        }
+        if (in_array($role, ['coordinator', 'supervisor'], true)) {
+            $selectedCompanyIds = $role === 'coordinator' ? $companyIds : ($companyId > 0 ? [$companyId] : []);
+            if ($selectedCompanyIds === []) sendError(400, 'An active company is required for this account.');
+            $activeCompanyCheck = $pdo->prepare('SELECT id FROM companies WHERE id = ? AND status = "Active" LIMIT 1');
+            foreach (array_unique($selectedCompanyIds) as $selectedCompanyId) {
+                $activeCompanyCheck->execute([(int)$selectedCompanyId]);
+                if (!$activeCompanyCheck->fetchColumn()) sendError(400, 'Selected company is not active or does not exist.');
+            }
         }
         if ($role === 'coordinator' || $role === 'student') {
             if ($programId <= 0 && $program !== '') {
@@ -287,12 +327,20 @@ switch ($action) {
         if (emailExists($pdo, $email, $id)) {
             sendError(409, 'That email is already in use.');
         }
+        if ($role === 'student' && $studentId !== '') {
+            $studentIdCheck = $pdo->prepare('SELECT id FROM users WHERE role = "student" AND student_id = ? AND id <> ? LIMIT 1');
+            $studentIdCheck->execute([$studentId, $id]);
+            if ($studentIdCheck->fetch()) sendError(409, 'That Student ID is already in use.');
+        }
 
         $password = trim($_POST['password'] ?? '');
         $confirm = trim($_POST['confirm_password'] ?? '');
         if ($password !== '' || $confirm !== '') {
             if ($password === '' || $confirm === '') {
                 sendError(400, 'Please provide both password and confirmation to update the password.');
+            }
+            if (strlen($password) < 8) {
+                sendError(400, 'Password must be at least 8 characters long.');
             }
             if ($password !== $confirm) {
                 sendError(400, 'Password and Confirm Password must match.');
@@ -309,6 +357,13 @@ switch ($action) {
         $oldUserStmt = $pdo->prepare('SELECT name, role, status FROM users WHERE id=? LIMIT 1');
         $oldUserStmt->execute([$id]);
         $oldUser = $oldUserStmt->fetch() ?: [];
+        if (!$oldUser) {
+            sendError(404, 'Account not found.');
+        }
+        if ($oldUser['role'] !== $role) {
+            sendError(409, 'An account role cannot be changed. Create a separate account with the correct role.');
+        }
+        $pdo->beginTransaction();
         try {
             updateUser(
                 $pdo,
@@ -348,10 +403,13 @@ switch ($action) {
                 ? ($status === 'Active' ? 'Activate ' : 'Deactivate ') . $roleLabel
                 : 'Update ' . $roleLabel;
             logActivity($pdo, (int)getSessionUser()['id'], $actionName, 'Updated ' . strtolower($roleLabel) . ' account for ' . $name . '.');
+            $pdo->commit();
             echo json_encode(['success' => true, 'message' => 'Account updated successfully.']);
             exit;
-        } catch (Exception $e) {
-            sendError(500, 'Unable to update account: ' . $e->getMessage());
+        } catch (Throwable $e) {
+            if ($pdo->inTransaction()) $pdo->rollBack();
+            error_log('[users] Account update failed: ' . $e->getMessage());
+            sendError(500, 'Unable to update account.');
         }
         break;
 
@@ -366,17 +424,27 @@ switch ($action) {
         if ($password !== $confirm) {
             sendError(400, 'Password and Confirm Password must match.');
         }
+        if (strlen($password) < 8) {
+            sendError(400, 'Password must be at least 8 characters long.');
+        }
+        $target = $pdo->prepare('SELECT name, role FROM users WHERE id = ? LIMIT 1');
+        $target->execute([$id]);
+        $target = $target->fetch();
+        if (!$target || !in_array($target['role'], ['student', 'coordinator', 'supervisor'], true)) {
+            sendError(404, 'Account not found.');
+        }
 
+        $pdo->beginTransaction();
         try {
             updateUserPassword($pdo, $id, $password);
-            $target = $pdo->prepare('SELECT name, role FROM users WHERE id=? LIMIT 1');
-            $target->execute([$id]);
-            $target = $target->fetch() ?: ['name' => 'User', 'role' => 'user'];
             logActivity($pdo, (int)getSessionUser()['id'], 'Update User Password', 'Reset password for ' . $target['name'] . '.');
+            $pdo->commit();
             echo json_encode(['success' => true, 'message' => 'Password reset successfully.']);
             exit;
-        } catch (Exception $e) {
-            sendError(500, 'Unable to reset password: ' . $e->getMessage());
+        } catch (Throwable $e) {
+            if ($pdo->inTransaction()) $pdo->rollBack();
+            error_log('[users] Password reset failed: ' . $e->getMessage());
+            sendError(500, 'Unable to reset password.');
         }
         break;
 
@@ -387,17 +455,24 @@ switch ($action) {
         if ($id <= 0 || !in_array($status, ['Active', 'Inactive'], true)) {
             sendError(400, 'Invalid request.');
         }
+        $target = $pdo->prepare('SELECT name, role FROM users WHERE id = ? LIMIT 1');
+        $target->execute([$id]);
+        $target = $target->fetch();
+        if (!$target || !in_array($target['role'], ['student', 'coordinator', 'supervisor'], true)) {
+            sendError(404, 'Account not found.');
+        }
+        $pdo->beginTransaction();
         try {
             changeUserStatus($pdo, $id, $status);
-            $target = $pdo->prepare('SELECT name, role FROM users WHERE id=? LIMIT 1');
-            $target->execute([$id]);
-            $target = $target->fetch() ?: ['name' => 'User', 'role' => 'user'];
             $roleLabel = ucfirst($target['role']);
             logActivity($pdo, (int)getSessionUser()['id'], $status === 'Active' ? 'Activate ' . $roleLabel : 'Deactivate ' . $roleLabel, ($status === 'Active' ? 'Activated ' : 'Deactivated ') . $target['name'] . '.');
+            $pdo->commit();
             echo json_encode(['success' => true, 'message' => 'Account status updated.']);
             exit;
-        } catch (Exception $e) {
-            sendError(500, 'Unable to update status: ' . $e->getMessage());
+        } catch (Throwable $e) {
+            if ($pdo->inTransaction()) $pdo->rollBack();
+            error_log('[users] Account status update failed: ' . $e->getMessage());
+            sendError(500, 'Unable to update account status.');
         }
         break;
 
