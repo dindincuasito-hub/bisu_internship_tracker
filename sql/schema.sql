@@ -112,15 +112,35 @@ CREATE TABLE IF NOT EXISTS `companies` (
   `id` INT AUTO_INCREMENT PRIMARY KEY,
   `name` VARCHAR(200) NOT NULL,
   `location` VARCHAR(255) DEFAULT '',
+  `contact_person` VARCHAR(160) DEFAULT '',
   `contact_email` VARCHAR(160) DEFAULT '',
   `contact_phone` VARCHAR(60) DEFAULT '',
   `address` TEXT DEFAULT NULL,
-  `latitude` DECIMAL(10,8) DEFAULT NULL,
-  `longitude` DECIMAL(11,8) DEFAULT NULL,
-  `allowed_radius_meters` INT NOT NULL DEFAULT 100,
   `status` ENUM('Active','Inactive') NOT NULL DEFAULT 'Active',
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE KEY `company_name_unique` (`name`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `coordinator_company` (
+  `id` INT AUTO_INCREMENT PRIMARY KEY,
+  `coordinator_id` INT NOT NULL,
+  `company_id` INT NOT NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY `coordinator_company_unique` (`coordinator_id`, `company_id`),
+  CONSTRAINT `coordinator_company_coordinator_fk` FOREIGN KEY (`coordinator_id`) REFERENCES `users` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `coordinator_company_company_fk` FOREIGN KEY (`company_id`) REFERENCES `companies` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `coordinator_company_assignments` (
+  `id` INT AUTO_INCREMENT PRIMARY KEY,
+  `coordinator_id` INT NOT NULL,
+  `company_id` INT NOT NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY `coordinator_company_assignments_unique` (`coordinator_id`, `company_id`),
+  CONSTRAINT `coordinator_company_assignments_coordinator_fk` FOREIGN KEY (`coordinator_id`) REFERENCES `users` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `coordinator_company_assignments_company_fk` FOREIGN KEY (`company_id`) REFERENCES `companies` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS `assignments` (
@@ -159,20 +179,6 @@ CREATE TABLE IF NOT EXISTS `attendance_logs` (
   `duration_minutes` INT DEFAULT NULL,
   `face_snapshot_in` LONGTEXT DEFAULT NULL,
   `face_snapshot_out` LONGTEXT DEFAULT NULL,
-  `time_in_latitude` DECIMAL(10,8) DEFAULT NULL,
-  `time_in_longitude` DECIMAL(11,8) DEFAULT NULL,
-  `time_in_accuracy` DECIMAL(10,2) DEFAULT NULL,
-  `time_in_address` VARCHAR(500) DEFAULT NULL,
-  `time_in_distance` DECIMAL(10,2) DEFAULT NULL,
-  `time_in_distance_meters` DECIMAL(10,2) DEFAULT NULL,
-  `time_in_location_status` ENUM('Verified','Not Verified','Pending') NOT NULL DEFAULT 'Pending',
-  `time_out_latitude` DECIMAL(10,8) DEFAULT NULL,
-  `time_out_longitude` DECIMAL(11,8) DEFAULT NULL,
-  `time_out_accuracy` DECIMAL(10,2) DEFAULT NULL,
-  `time_out_address` VARCHAR(500) DEFAULT NULL,
-  `time_out_distance` DECIMAL(10,2) DEFAULT NULL,
-  `time_out_distance_meters` DECIMAL(10,2) DEFAULT NULL,
-  `time_out_location_status` ENUM('Verified','Not Verified','Pending') NOT NULL DEFAULT 'Pending',
   `verification_status` ENUM('Verified','Failed','Pending') NOT NULL DEFAULT 'Pending',
   `status` ENUM('Present','Late','Absent','Excused') NOT NULL DEFAULT 'Present',
   `remarks` VARCHAR(255) DEFAULT NULL,
