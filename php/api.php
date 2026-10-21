@@ -32,22 +32,41 @@ function sendError(string $message, int $code = 400): void
 
 function verifyStudentFace(PDO $pdo, int $userId, string $submittedEncoding): void
 {
-    $stmt = $pdo->prepare('SELECT face_image, face_encoding FROM face_registrations WHERE user_id=? AND registration_status="Registered" ORDER BY id DESC LIMIT 1');
+    $stmt = $pdo->prepare('SELECT face_image, face_encoding FROM face_registrations
+        WHERE user_id=? AND (LOWER(TRIM(registration_status))="registered" OR LOWER(TRIM(status))="registered")
+        ORDER BY id DESC LIMIT 1');
     $stmt->execute([$userId]);
     $registration = $stmt->fetch(PDO::FETCH_ASSOC);
     $storedPath = (string)($registration['face_image'] ?? '');
-    $physicalPath = dirname(__DIR__) . '/' . ltrim($storedPath, '/');
-    $imageInfo = is_file($physicalPath) ? @getimagesize($physicalPath) : false;
-    if (!$registration || !is_file($physicalPath) || !$imageInfo || ($imageInfo[0] ?? 0) < 160 || ($imageInfo[1] ?? 0) < 120) {
-        sendError('Registered face image is missing or invalid. Please register your face again.', 403);
+    $projectRoot = realpath(dirname(__DIR__));
+    $uploadRoot = realpath(dirname(__DIR__) . '/uploads/face_registrations');
+    $physicalPath = $projectRoot && str_starts_with($storedPath, 'uploads/')
+        ? realpath($projectRoot . '/' . $storedPath)
+        : false;
+    $imageInfo = $physicalPath && is_file($physicalPath) ? @getimagesize($physicalPath) : false;
+    if (!$registration || !$uploadRoot || !$physicalPath
+        || !str_starts_with($physicalPath, $uploadRoot . DIRECTORY_SEPARATOR)
+        || !$imageInfo || ($imageInfo[0] ?? 0) < 160 || ($imageInfo[1] ?? 0) < 120) {
+        sendError('Your registered face image is unavailable. Please contact your coordinator.', 403);
     }
     $stored = json_decode((string)$registration['face_encoding'], true);
     $submitted = json_decode($submittedEncoding, true);
-    if (!is_array($stored) || count($stored) !== 128) {
-        sendError('Face registration required before Time In/Time Out.', 403);
+    $isValidEncoding = static function ($encoding): bool {
+        if (!is_array($encoding) || count($encoding) !== 128) {
+            return false;
+        }
+        foreach ($encoding as $value) {
+            if (!is_numeric($value) || !is_finite((float)$value)) {
+                return false;
+            }
+        }
+        return true;
+    };
+    if (!$isValidEncoding($stored)) {
+        sendError('Your face is not registered. Please contact your coordinator.', 403);
     }
-    if (!is_array($submitted) || count($submitted) !== 128 || count(array_filter($submitted, 'is_numeric')) !== 128) {
-        sendError('Face does not match the registered student.', 403);
+    if (!$isValidEncoding($submitted)) {
+        sendError('Face not recognized. Please position your face properly and try again.', 403);
     }
     $sum = 0.0;
     for ($index = 0; $index < 128; $index++) {
@@ -55,40 +74,8 @@ function verifyStudentFace(PDO $pdo, int $userId, string $submittedEncoding): vo
         $sum += $difference * $difference;
     }
     if (sqrt($sum) > 0.60) {
-        sendError('Face does not match the registered student.', 403);
+        sendError('Face not recognized. Please position your face properly and try again.', 403);
     }
-}
-
-function parseCoordinatePair(array $payload, string $label, bool $required = false): ?array
-{
-    $latitudeRaw = trim((string)($payload['latitude'] ?? ''));
-    $longitudeRaw = trim((string)($payload['longitude'] ?? ''));
-    if ($latitudeRaw === '' && $longitudeRaw === '' && !$required) {
-        return null;
-    }
-    if ($latitudeRaw === '' || $longitudeRaw === '' || !is_numeric($latitudeRaw) || !is_numeric($longitudeRaw)) {
-        sendError($label . ' latitude and longitude are both required and must be numeric.', 400);
-    }
-
-    $latitude = (float)$latitudeRaw;
-    $longitude = (float)$longitudeRaw;
-    if ($latitude < -90 || $latitude > 90 || $longitude < -180 || $longitude > 180) {
-        sendError($label . ' coordinates are outside valid ranges.', 400);
-    }
-
-    return ['latitude' => $latitude, 'longitude' => $longitude];
-}
-
-function parseAllowedRadiusMeters(array $payload): int
-{
-    $rawRadius = trim((string)($payload['allowed_radius_meters'] ?? ''));
-    if ($rawRadius === '') {
-        return 100;
-    }
-    if (!ctype_digit($rawRadius) || (int)$rawRadius < 1 || (int)$rawRadius > 10000) {
-        sendError('Allowed radius must be a whole number between 1 and 10000 meters.', 400);
-    }
-    return (int)$rawRadius;
 }
 
 function calculateAttendancePairSeconds(?string $start, ?string $end): ?int
@@ -496,7 +483,7 @@ if ($resource === 'companies') {
         $hasPagination = $search !== '' || array_key_exists('page', $_GET) || array_key_exists('limit', $_GET);
 
         if (!$hasPagination) {
-            $stmt = $pdo->query('SELECT * FROM companies ORDER BY name ASC');
+            $stmt = $pdo->query('SELECT id, name, location, contact_person, contact_email, contact_phone, address, status, created_at FROM companies ORDER BY name ASC');
             send(['success' => true, 'companies' => $stmt->fetchAll()]);
         }
 
@@ -517,7 +504,7 @@ if ($resource === 'companies') {
         $page = min($page, $totalPages);
         $offset = ($page - 1) * $pageSize;
 
-        $stmt = $pdo->prepare('SELECT * FROM companies' . $where . ' ORDER BY name ASC LIMIT ? OFFSET ?');
+        $stmt = $pdo->prepare('SELECT id, name, location, contact_person, contact_email, contact_phone, address, status, created_at FROM companies' . $where . ' ORDER BY name ASC LIMIT ? OFFSET ?');
         foreach ($searchParams as $index => $value) {
             $stmt->bindValue($index + 1, $value, PDO::PARAM_STR);
         }
@@ -546,8 +533,6 @@ if ($resource === 'companies') {
         $contactPerson = trim($body['contact_person'] ?? $body['name'] ?? '');
         $contactEmail = trim($body['contact_email'] ?? '');
         $contactPhone = trim($body['contact_phone'] ?? '');
-        $coordinates = parseCoordinatePair($body, 'Company');
-        $allowedRadius = parseAllowedRadiusMeters($body);
         $status = trim($body['status'] ?? 'Active');
         if ($name === '' || ($address === '' && $location === '') || strlen($name) > 200 || strlen($address) > 65535
             || strlen($contactPerson) > 160 || strlen($contactEmail) > 160 || strlen($contactPhone) > 60
@@ -561,8 +546,8 @@ if ($resource === 'companies') {
         $check = $pdo->prepare('SELECT 1 FROM companies WHERE name=? LIMIT 1');
         $check->execute([$name]);
         if ($check->fetchColumn()) sendError('Company name already exists.', 409);
-        $stmt = $pdo->prepare('INSERT INTO companies (name, location, contact_person, address, contact_email, contact_phone, latitude, longitude, allowed_radius_meters, status) VALUES (?,?,?,?,?,?,?,?,?,?)');
-        $stmt->execute([$name, $location ?: $address, $contactPerson, $address, $contactEmail, $contactPhone, $coordinates['latitude'] ?? null, $coordinates['longitude'] ?? null, $allowedRadius, $status]);
+        $stmt = $pdo->prepare('INSERT INTO companies (name, location, contact_person, address, contact_email, contact_phone, status) VALUES (?,?,?,?,?,?,?)');
+        $stmt->execute([$name, $location ?: $address, $contactPerson, $address, $contactEmail, $contactPhone, $status]);
         $companyId = (int)$pdo->lastInsertId();
         if ($status === 'Active' && $user['role'] === 'admin') {
             try {
@@ -596,9 +581,7 @@ if ($resource === 'companies') {
         $exists = $pdo->prepare('SELECT id FROM companies WHERE id = ? LIMIT 1');
         $exists->execute([$id]);
         if (!$exists->fetch()) sendError('Company not found.', 404);
-        $coordinates = parseCoordinatePair($body, 'Company');
-        $allowedRadius = parseAllowedRadiusMeters($body);
-        $stmt = $pdo->prepare('UPDATE companies SET name=?, location=?, contact_person=?, address=?, contact_email=?, contact_phone=?, latitude=?, longitude=?, allowed_radius_meters=?, status=? WHERE id=?');
+        $stmt = $pdo->prepare('UPDATE companies SET name=?, location=?, contact_person=?, address=?, contact_email=?, contact_phone=?, status=? WHERE id=?');
         $stmt->execute([
             $name,
             $location ?: $address,
@@ -606,9 +589,6 @@ if ($resource === 'companies') {
             $address,
             $contactEmail,
             $contactPhone,
-            $coordinates['latitude'] ?? null,
-            $coordinates['longitude'] ?? null,
-            $allowedRadius,
             $status,
             $id,
         ]);

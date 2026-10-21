@@ -193,7 +193,7 @@ PAGE_RENDERERS.student = {
           <div id="face-reg-status-card" class="card rounded-4 shadow-sm bg-white mt-3">
             <div class="card-body">
               <div class="d-flex align-items-center gap-3 mb-3">
-                <img id="student-face-reg-preview" src="${ROLES.student.photo}" alt="Registered face" class="rounded-circle" style="width:92px;height:92px;object-fit:cover;background:#f8f9fa;">
+                <img id="student-face-reg-preview" src="" alt="Registered face" class="rounded-circle" style="width:92px;height:92px;object-fit:cover;background:#f8f9fa;display:none;">
                 <div>
                   <h6 class="mb-1">Registration Status</h6>
                   <div class="d-flex align-items-center gap-2">

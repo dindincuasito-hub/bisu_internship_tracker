@@ -17,7 +17,6 @@ let faceValidationLoop = null;
 let faceValidationCanvas = null;
 let embeddedFacePreviewStream = null;
 let faceTemplateCache = null;
-let faceValidationReadyFrames = 0;
 let lastFaceValidationRun = 0;
 let faceValidationFrameInterval = 250;
 let faceValidationState = {
@@ -38,6 +37,7 @@ let faceValidationState = {
 };
 let faceRegistrationSamples = [];
 let faceRegistrationPending = false;
+let faceRegistrationCapturing = false;
 let faceRegistrationSaving = false;
 let faceValidationAction = 'register';
 const FACE_REG_STATE = {
@@ -47,10 +47,16 @@ const FACE_REG_STATE = {
   remarks: '',
   history: [],
   capturedImage: '',
+  faceEncoding: null,
   cameraActive: false,
   faceCaptured: false,
   successMessage: ''
 };
+function isFaceDescriptorValid(descriptor) {
+  return Array.isArray(descriptor)
+    && descriptor.length === 128
+    && descriptor.every(value => Number.isFinite(value));
+}
 let FACE_REGISTRATION_REGISTERED = false;
 let FACE_REGISTRATION_STATUS_VERIFIED = false;
 let FACE_REGISTRATION_LOCKED = false;
@@ -2739,8 +2745,8 @@ async function refreshFaceRegistrationState() {
     const result = await getFaceRegistrationEndpoint('status');
     FACE_REGISTRATION_STATUS_VERIFIED = result.success === true;
     FACE_REGISTRATION_LOCKED = FACE_REGISTRATION_STATUS_VERIFIED
-      && (result.registered === true || String(result.status || '').toLowerCase() === 'registered');
-    FACE_REGISTRATION_REGISTERED = FACE_REGISTRATION_LOCKED && result.registered === true && result.imageValid === true && !!result.faceEncoding;
+      && (result.registrationLocked === true || result.registered === true || String(result.status || '').toLowerCase() === 'registered');
+    FACE_REGISTRATION_REGISTERED = FACE_REGISTRATION_LOCKED && result.registered === true && result.imageValid === true && result.faceEncodingValid === true;
   } catch (error) {
     FACE_REGISTRATION_STATUS_VERIFIED = false;
     FACE_REGISTRATION_LOCKED = false;
@@ -3140,7 +3146,7 @@ async function recordAttendance(type, scanData, faceEncoding, eventType = pendin
     });
     const data = await response.json();
     if (!response.ok || !data.success) {
-      alert(data.message || `${event.label} was not recorded.`);
+      setFaceModalStatus(data.message || `${event.label} was not recorded.`, 'error');
       return false;
     }
 
@@ -3177,7 +3183,7 @@ async function recordAttendance(type, scanData, faceEncoding, eventType = pendin
     return true;
   } catch (error) {
     console.warn(`Attendance event ${selectedEvent} failed:`, error);
-    alert(error.message || `${event.label} could not be recorded.`);
+    setFaceModalStatus(error.message || `${event.label} could not be recorded.`, 'error');
     return false;
   }
 }
@@ -3284,7 +3290,18 @@ function getFaceRegistrationEndpoint(action, data = {}) {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: params.toString()
-  }).then(res => res.json());
+  }).then(async response => {
+    let result;
+    try {
+      result = await response.json();
+    } catch {
+      throw new Error('Face registration service returned an invalid response.');
+    }
+    if (!response.ok || result.success === false) {
+      throw new Error(result.message || 'Unable to load face registration.');
+    }
+    return result;
+  });
 }
 
 let realFaceModelsPromise = null;
@@ -3296,7 +3313,10 @@ async function ensureRealFaceRecognition() {
       faceapi.nets.tinyFaceDetector.loadFromUri(modelUrl),
       faceapi.nets.faceLandmark68Net.loadFromUri(modelUrl),
       faceapi.nets.faceRecognitionNet.loadFromUri(modelUrl)
-    ]);
+    ]).catch(error => {
+      realFaceModelsPromise = null;
+      throw new Error(`Face recognition models could not be loaded: ${error.message || 'check your connection and try again.'}`);
+    });
   }
   await realFaceModelsPromise;
 }
@@ -3350,7 +3370,10 @@ async function loadFaceRegistrationStatus() {
   if (captureBtn) captureBtn.disabled = true;
   if (retakeBtn) retakeBtn.disabled = true;
   if (saveBtn) saveBtn.disabled = true;
-  if (previewImg) previewImg.src = ROLES.student.photo || '';
+  if (previewImg) {
+    previewImg.src = '';
+    previewImg.style.display = 'none';
+  }
   if (capturedPreview) {
     capturedPreview.style.display = 'none';
     capturedPreview.src = '';
@@ -3370,15 +3393,16 @@ async function loadFaceRegistrationStatus() {
     }
 
     const faceImage = typeof result.faceImage === 'string' ? result.faceImage.trim() : '';
-    const registered = result.registered === true || String(result.status || '').toLowerCase() === 'registered';
-    const imageAvailable = registered && result.imageValid === true && !!faceImage;
-    const brokenRegisteredImage = registered && result.imageValid === false;
+    const registered = result.registered === true && result.imageValid === true && result.faceEncodingValid === true;
+    const registrationLocked = result.registrationLocked === true || registered || String(result.status || '').toLowerCase() === 'registered';
+    const imageAvailable = registrationLocked && result.imageValid === true && !!faceImage;
+    const brokenRegisteredImage = registrationLocked && result.imageValid === false;
     FACE_REGISTRATION_STATUS_VERIFIED = true;
-    FACE_REGISTRATION_LOCKED = registered;
-    FACE_REGISTRATION_REGISTERED = registered && imageAvailable && !!result.faceEncoding;
+    FACE_REGISTRATION_LOCKED = registrationLocked;
+    FACE_REGISTRATION_REGISTERED = registered && imageAvailable && result.faceEncodingValid === true;
     if (previewImg) {
-      previewImg.src = imageAvailable ? `${faceImage}${faceImage.includes('?') ? '&' : '?'}v=${Date.now()}` : (ROLES.student.photo || '');
-      previewImg.style.display = imageAvailable ? 'block' : '';
+      previewImg.src = imageAvailable ? `${faceImage}${faceImage.includes('?') ? '&' : '?'}v=${Date.now()}` : '';
+      previewImg.style.display = imageAvailable ? 'block' : 'none';
       previewImg.onload = () => {
         previewImg.style.display = 'block';
       };
@@ -3393,7 +3417,7 @@ async function loadFaceRegistrationStatus() {
       ROLES.student.photo = faceImage;
     }
     if (badge) {
-      badge.className = registered ? 'badge bg-success' : result.status === 'Pending' ? 'badge bg-warning text-dark' : 'badge bg-secondary';
+      badge.className = registered ? 'badge bg-success' : registrationLocked ? 'badge bg-warning text-dark' : result.status === 'Pending' ? 'badge bg-warning text-dark' : 'badge bg-secondary';
       badge.innerHTML = registered ? '<i class="bi bi-check-circle-fill me-1" aria-hidden="true"></i>Face Already Registered' : (result.status || 'Not Registered');
     }
     if (statusText) statusText.textContent = registered
@@ -3402,8 +3426,8 @@ async function loadFaceRegistrationStatus() {
     if (brokenRegisteredImage) {
       showFaceRegAlert(result.message || 'Registered face image could not be loaded.', 'error');
     }
-    if (regDate) regDate.textContent = registered && result.registrationDate ? new Date(result.registrationDate).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) : '—';
-    if (regTime) regTime.textContent = registered && result.registrationDate ? new Date(result.registrationDate).toLocaleTimeString('en-PH', { hour: '2-digit', minute: '2-digit', hour12: true }) : '—';
+    if (regDate) regDate.textContent = registrationLocked && result.registrationDate ? new Date(result.registrationDate).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) : '—';
+    if (regTime) regTime.textContent = registrationLocked && result.registrationDate ? new Date(result.registrationDate).toLocaleTimeString('en-PH', { hour: '2-digit', minute: '2-digit', hour12: true }) : '—';
     if (capturedPreview && imageAvailable) {
       capturedPreview.src = `${faceImage}${faceImage.includes('?') ? '&' : '?'}v=${Date.now()}`;
       capturedPreview.style.display = 'block';
@@ -3437,13 +3461,13 @@ function updateFaceRegistrationControls() {
     openBtn.disabled = registrationBlocked || !!faceRegCameraStream;
   }
   if (captureBtn) {
-    captureBtn.disabled = registrationBlocked || !faceValidationState.ready || !faceRegCameraStream;
+    captureBtn.disabled = registrationBlocked || faceRegistrationCapturing || faceRegistrationSaving || !faceValidationState.ready || !faceRegCameraStream;
   }
   if (retakeBtn) {
     retakeBtn.disabled = registrationBlocked || !FACE_REG_STATE.faceCaptured;
   }
   if (saveBtn) {
-    saveBtn.disabled = registrationBlocked || !FACE_REG_STATE.faceCaptured;
+    saveBtn.disabled = registrationBlocked || !FACE_REG_STATE.faceCaptured || !isFaceDescriptorValid(FACE_REG_STATE.faceEncoding);
   }
 }
 
@@ -3498,29 +3522,20 @@ async function captureCroppedRegistrationFace(video) {
   }
   const box = detections[0].detection.box;
   const faceBox = { x: box.x, y: box.y, width: box.width, height: box.height };
-  const guideDiameter = Math.min(video.videoWidth * 0.42, video.videoHeight * 0.72);
+  const guideDiameter = video.videoWidth * 0.42;
   const centerX = video.videoWidth / 2;
   const centerY = video.videoHeight / 2;
   const faceCenterX = faceBox.x + faceBox.width / 2;
   const faceCenterY = faceBox.y + faceBox.height / 2;
   if (faceBox.width < guideDiameter * 0.52) throw new Error('Move closer to the camera.');
-  if (faceBox.width > guideDiameter * 0.92 || faceBox.height > guideDiameter * 0.92) throw new Error('Move slightly farther from the camera.');
-  if (Math.abs(faceCenterX - centerX) >= guideDiameter * 0.1 || Math.abs(faceCenterY - centerY) >= guideDiameter * 0.1) {
+  if (faceBox.width > guideDiameter * 1.08 || faceBox.height > guideDiameter * 1.08) throw new Error('Move slightly farther from the camera to fit the circular guide.');
+  if (Math.abs(faceCenterX - centerX) >= guideDiameter * 0.20 || Math.abs(faceCenterY - centerY) >= guideDiameter * 0.20) {
     throw new Error('Center your face inside the circle.');
-  }
-  const facePadX = faceBox.width * 0.08;
-  const facePadY = faceBox.height * 0.08;
-  const guideCorners = [
-    [faceBox.x - facePadX, faceBox.y - facePadY],
-    [faceBox.x + faceBox.width + facePadX, faceBox.y - facePadY],
-    [faceBox.x - facePadX, faceBox.y + faceBox.height + facePadY],
-    [faceBox.x + faceBox.width + facePadX, faceBox.y + faceBox.height + facePadY]
-  ];
-  if (!guideCorners.every(([x, y]) => ((x - centerX) ** 2 + (y - centerY) ** 2) <= (guideDiameter * 0.47) ** 2)) {
-    throw new Error('Make sure your entire face is visible inside the circle.');
   }
   const landmarks = detections[0].landmarks.positions;
   if (landmarks.length < 68) throw new Error('Make sure your entire face is visible.');
+  const eyesVisible = landmarks.slice(36, 48).every(point => point.x >= faceBox.x && point.x <= faceBox.x + faceBox.width && point.y >= faceBox.y && point.y <= faceBox.y + faceBox.height);
+  if (!eyesVisible) throw new Error('Make sure both eyes are visible inside the frame.');
   const quality = measureFaceImageQuality(video, faceBox);
   if (!quality.lightingGood) throw new Error('Improve the lighting on your face before capturing.');
   if (!quality.blurGood) throw new Error('Hold still; the image is blurry.');
@@ -3610,11 +3625,8 @@ async function openFaceRegistrationCamera() {
   });
 }
 
-function captureFaceForRegistration() {
-  if (!canModifyFaceRegistration()) return;
-  if (faceRegistrationSaving) {
-    return;
-  }
+async function captureFaceForRegistration() {
+  if (!canModifyFaceRegistration() || faceRegistrationCapturing || faceRegistrationSaving) return;
   if (!faceRegCameraStream) {
     showFaceRegAlert('Please open the camera first.', 'warning');
     return;
@@ -3639,8 +3651,8 @@ function captureFaceForRegistration() {
     showFaceRegAlert('Face is too close to the camera.', 'error');
     return;
   }
-  if (!faceValidationState.insideGuide) {
-    showFaceRegAlert('Face is outside the detection frame.', 'error');
+  if (!faceValidationState.faceCentered || !faceValidationState.insideGuide) {
+    showFaceRegAlert('Center your face inside the circular guide.', 'error');
     return;
   }
   if (!faceValidationState.lightingGood) {
@@ -3657,13 +3669,25 @@ function captureFaceForRegistration() {
   }
 
   const video = document.getElementById('cameraPreview');
-  captureCroppedRegistrationFace(video).then((imageData) => {
+  if (!video) {
+    showFaceRegAlert('Camera preview is unavailable.', 'error');
+    return;
+  }
+  faceRegistrationCapturing = true;
+  updateFaceRegistrationControls();
+  showFaceRegAlert('Capturing and validating the current frame…', 'info');
+  try {
+    const imageData = await captureCroppedRegistrationFace(video);
+    const faceEncoding = await getRealFaceDescriptor(imageData);
+    if (!isFaceDescriptorValid(faceEncoding)) {
+      throw new Error('Unable to create a valid face descriptor. Please reposition your face and try again.');
+    }
     const preview = document.getElementById('face-reg-captured-preview');
     if (preview) {
       preview.src = imageData;
       preview.style.display = 'block';
     }
-    setFaceRegistrationState({ faceCaptured: true, capturedImage: imageData });
+    setFaceRegistrationState({ cameraActive: false, faceCaptured: true, capturedImage: imageData, faceEncoding });
     const indicator = document.getElementById('face-detection-indicator');
     if (indicator) {
       indicator.textContent = 'Face Captured';
@@ -3674,15 +3698,15 @@ function captureFaceForRegistration() {
       faceRegCameraStream.getTracks().forEach((track) => track.stop());
       faceRegCameraStream = null;
     }
-    const video = document.getElementById('cameraPreview');
-    if (video) video.srcObject = null;
-    faceRegistrationSaving = false;
-    showFaceRegAlert('Face captured. Review the image, then save your registration.', 'info');
-    updateFaceRegistrationControls();
-  }).catch((error) => {
+    video.srcObject = null;
+    showFaceRegAlert('Face captured and validated. Review the image, then save your registration.', 'info');
+  } catch (error) {
     console.error('Face capture failed', error);
     showFaceRegAlert(error.message || 'Face capture failed.', 'error');
-  });
+  } finally {
+    faceRegistrationCapturing = false;
+    updateFaceRegistrationControls();
+  }
 }
 
 function retakeFaceRegistration() {
@@ -3692,7 +3716,7 @@ function retakeFaceRegistration() {
     preview.src = '';
     preview.style.display = 'none';
   }
-  setFaceRegistrationState({ faceCaptured: false, capturedImage: '' });
+  setFaceRegistrationState({ faceCaptured: false, capturedImage: '', faceEncoding: null });
   openFaceRegistrationCamera();
 }
 
@@ -3715,14 +3739,14 @@ function cancelFaceRegistration() {
     indicator.textContent = 'No Face Detected';
     indicator.className = 'badge bg-secondary';
   }
-  setFaceRegistrationState({ cameraActive: false, faceCaptured: false, capturedImage: '' });
+  setFaceRegistrationState({ cameraActive: false, faceCaptured: false, capturedImage: '', faceEncoding: null });
 }
 
 async function saveFaceRegistration() {
   if (faceRegistrationSaving) return;
   if (!canModifyFaceRegistration()) return;
-  if (!FACE_REG_STATE.faceCaptured || !FACE_REG_STATE.capturedImage) {
-    showFaceRegAlert('Capture your face before saving the registration.', 'warning');
+  if (!FACE_REG_STATE.faceCaptured || !FACE_REG_STATE.capturedImage || !isFaceDescriptorValid(FACE_REG_STATE.faceEncoding)) {
+    showFaceRegAlert('Capture and validate your face before saving the registration.', 'warning');
     return;
   }
   if (!/^data:image\/(jpeg|png);base64,/.test(FACE_REG_STATE.capturedImage)) {
@@ -3736,7 +3760,7 @@ async function saveFaceRegistration() {
     saveBtn.textContent = 'Saving…';
   }
   try {
-    const response = await registerFace(FACE_REG_STATE.capturedImage);
+    const response = await registerFace(FACE_REG_STATE.capturedImage, FACE_REG_STATE.faceEncoding);
     if (!response || response.success !== true) {
       showFaceRegAlert(response?.message || 'Unable to save your face registration. Please try again.', 'error');
       return;
@@ -3747,7 +3771,7 @@ async function saveFaceRegistration() {
       registeredImage.src = `${savedFaceImage}${savedFaceImage.includes('?') ? '&' : '?'}v=${Date.now()}`;
       registeredImage.style.display = 'block';
     }
-    setFaceRegistrationState({ faceCaptured: false, capturedImage: '' });
+    setFaceRegistrationState({ faceCaptured: false, capturedImage: '', faceEncoding: null });
     await loadFaceRegistrationStatus();
   } finally {
     faceRegistrationSaving = false;
@@ -3775,52 +3799,6 @@ function startFaceRegistrationFlow() {
 function cancelFaceRegistrationFlow() {
   faceRegistrationPending = false;
   closeFaceModal();
-}
-
-async function registerFace(scanData, replaceExisting = false) {
-  if (currentRole === 'student' && !canModifyFaceRegistration()) return;
-  const actionBtn = document.getElementById('face-reg-action-btn');
-  if (actionBtn) {
-    actionBtn.disabled = true;
-    actionBtn.textContent = 'Saving registration…';
-  }
-
-  try {
-    const response = await getFaceRegistrationEndpoint('register', { faceImage: scanData, replace: replaceExisting ? '1' : '' });
-    if (!response.success) {
-      if (actionBtn) {
-        actionBtn.disabled = false;
-        actionBtn.textContent = '📸 Capture Face';
-      }
-      if (response.registered === true && response.message && response.message.includes('replace')) {
-        const replace = confirm('You already have a registered face. Do you want to replace it?');
-        if (replace) {
-          return await registerFace(scanData, true);
-        }
-        showFaceRegAlert('Registration cancelled. Existing face remains unchanged.', 'warning');
-        addNotification('Face registration cancelled by user.', 'warning');
-        return;
-      }
-      const message = response.message || 'Unable to complete registration at this time.';
-      showFaceRegAlert(message, 'danger');
-      addNotification(message, 'warning');
-      return;
-    }
-
-    ROLES.student.photo = scanData;
-    const refImg = document.getElementById('face-modal-ref-img');
-    if (refImg) refImg.src = scanData;
-    addNotification('Face registration successful', 'success');
-    await loadFaceRegistrationStatus();
-    showFaceRegAlert('✓ Face registered successfully. You may now use Face Recognition for Time In and Time Out.', 'success');
-  } catch (err) {
-    if (actionBtn) {
-      actionBtn.disabled = false;
-      actionBtn.textContent = '📸 Capture Face';
-    }
-    console.error('Face registration failed', err);
-    showFaceRegAlert('Face registration failed. Please try again later.', 'danger');
-  }
 }
 
 function triggerFilePicker() {
@@ -4199,13 +4177,13 @@ function updateFaceValidationUI(state) {
       openBtn.disabled = !!faceRegCameraStream;
     }
     if (captureBtn) {
-      captureBtn.disabled = !faceValidationState.ready || !faceRegCameraStream;
+      captureBtn.disabled = faceRegistrationCapturing || faceRegistrationSaving || !faceValidationState.ready || !faceRegCameraStream;
     }
     if (retakeBtn) {
       retakeBtn.disabled = !FACE_REG_STATE.faceCaptured;
     }
     if (saveBtn) {
-      saveBtn.disabled = !FACE_REG_STATE.faceCaptured;
+      saveBtn.disabled = faceRegistrationCapturing || faceRegistrationSaving || !FACE_REG_STATE.faceCaptured || !isFaceDescriptorValid(FACE_REG_STATE.faceEncoding);
     }
   }
 }
@@ -4273,7 +4251,6 @@ async function evaluateFaceFrame(video) {
     const multipleFaces = detections.length > 1;
     const faceDetected = detections.length === 1;
     if (!faceDetected) {
-      faceValidationReadyFrames = 0;
       return {
         cameraConnected: true, faceDetected: false, faceCentered: false, lightingGood: false, blurGood: false,
         cameraQuality: false, eyesVisible: false, insideGuide: false, multipleFaces, faceTooFar: false,
@@ -4284,23 +4261,16 @@ async function evaluateFaceFrame(video) {
 
     const box = detections[0].detection.box;
     const faceBox = { x: box.x, y: box.y, width: box.width, height: box.height };
-    const guideDiameter = Math.min(video.videoWidth * 0.42, video.videoHeight * 0.72);
+    const guideDiameter = video.videoWidth * 0.42;
     const centerX = video.videoWidth / 2;
     const centerY = video.videoHeight / 2;
     const faceCenterX = faceBox.x + faceBox.width / 2;
     const faceCenterY = faceBox.y + faceBox.height / 2;
     const faceTooFar = faceBox.width < guideDiameter * 0.52;
-    const faceTooClose = faceBox.width > guideDiameter * 0.92 || faceBox.height > guideDiameter * 0.92;
-    const faceCentered = Math.abs(faceCenterX - centerX) < guideDiameter * 0.1 && Math.abs(faceCenterY - centerY) < guideDiameter * 0.1;
-    const padX = faceBox.width * 0.08;
-    const padY = faceBox.height * 0.08;
-    const corners = [
-      [faceBox.x - padX, faceBox.y - padY],
-      [faceBox.x + faceBox.width + padX, faceBox.y - padY],
-      [faceBox.x - padX, faceBox.y + faceBox.height + padY],
-      [faceBox.x + faceBox.width + padX, faceBox.y + faceBox.height + padY]
-    ];
-    const insideGuide = corners.every(([x, y]) => ((x - centerX) ** 2 + (y - centerY) ** 2) <= (guideDiameter * 0.47) ** 2);
+    const faceTooClose = faceBox.width > guideDiameter * 1.08 || faceBox.height > guideDiameter * 1.08;
+    const faceCenterAligned = Math.abs(faceCenterX - centerX) < guideDiameter * 0.20 && Math.abs(faceCenterY - centerY) < guideDiameter * 0.20;
+    const insideGuide = faceBox.width <= guideDiameter * 1.08 && faceBox.height <= guideDiameter * 1.08;
+    const faceCentered = faceCenterAligned && insideGuide;
     const landmarks = detections[0].landmarks.positions;
     const eyesVisible = landmarks.length >= 68 && landmarks.slice(36, 48).every(point => point.x >= faceBox.x && point.x <= faceBox.x + faceBox.width && point.y >= faceBox.y && point.y <= faceBox.y + faceBox.height);
     const quality = measureFaceImageQuality(video, faceBox);
@@ -4311,7 +4281,7 @@ async function evaluateFaceFrame(video) {
     let ready = false;
     if (faceTooFar) message = 'Move closer to the camera.';
     else if (faceTooClose) message = 'Move slightly farther from the camera.';
-    else if (!faceCentered) message = 'Center your face inside the circle.';
+    else if (!faceCenterAligned) message = 'Center your face inside the circle.';
     else if (!insideGuide) message = 'Make sure your entire face is visible inside the circle.';
     else if (!eyesVisible) message = 'Make sure your entire face is visible.';
     else if (!lightingGood) message = 'Improve the lighting on your face.';
@@ -4320,15 +4290,12 @@ async function evaluateFaceFrame(video) {
       ready = true;
       message = 'Face detected. Ready to capture.';
     }
-    faceValidationReadyFrames = ready ? faceValidationReadyFrames + 1 : 0;
-    const stableReady = faceValidationReadyFrames >= 2;
     return {
       cameraConnected: true, faceDetected, faceCentered, lightingGood, blurGood, cameraQuality, eyesVisible,
-      insideGuide, multipleFaces, faceTooFar, faceTooClose, faceBox, ready: stableReady,
-      message: stableReady ? 'Face detected. Ready to capture.' : message
+      insideGuide, multipleFaces, faceTooFar, faceTooClose, faceBox, ready,
+      message
     };
   } catch (error) {
-    faceValidationReadyFrames = 0;
     return {
       cameraConnected: true, faceDetected: false, faceCentered: false, lightingGood: false, blurGood: false,
       cameraQuality: false, eyesVisible: false, insideGuide: false, multipleFaces: false, faceTooFar: false,
@@ -4342,7 +4309,7 @@ function startFaceValidationLoop(video, type = 'register') {
     return;
   }
   stopFaceValidationLoop();
-  faceValidationReadyFrames = 0;
+  faceValidationState = { ...faceValidationState, cameraConnected: true, ready: false, message: 'Camera connected. Please position your face.' };
   let running = false;
   const tick = async () => {
     if (running) return;
@@ -4353,6 +4320,14 @@ function startFaceValidationLoop(video, type = 'register') {
     faceValidationLoop = requestAnimationFrame(tick);
   };
   faceValidationLoop = requestAnimationFrame(tick);
+}
+async function waitForFaceValidationReady(timeoutMs = 30000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (faceValidationState.ready && faceValidationState.cameraConnected) return;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  throw new Error(faceValidationState.message || 'Face not recognized. Please position your face properly and try again.');
 }
 function startEmbeddedPreview() {
   const video = document.getElementById('cameraPreview');
@@ -4487,7 +4462,7 @@ async function startCamera(type) {
     const scanImg = document.getElementById('face-modal-scan-img');
     if (video) {
       video.srcObject = stream;
-      await video.play().catch(() => {});
+      await video.play();
     }
     updateFaceValidationUI({ cameraConnected: true, message: 'Camera connected. Please position your face.' });
     setFaceModalStatus('🔍 Scanning face…', 'info');
@@ -4508,13 +4483,16 @@ async function startCamera(type) {
           : '';
         refImg.style.display = registration.imageValid && registeredImage ? 'block' : 'none';
       }
-      if (!registration.registered || !registration.imageValid || !registration.faceEncoding) {
-        setFaceModalStatus('Face registration required before Time In/Time Out.', 'error');
+      if (!registration.registered || !registration.imageValid || registration.faceEncodingValid !== true) {
+        setFaceModalStatus(registration.message || 'Your face is not registered. Please contact your coordinator.', 'error');
         stopCamera();
+        stopFaceValidationLoop();
         return;
       }
       let readyFrame;
       try {
+        setFaceModalStatus('Please position your face and hold still for verification.', 'info');
+        await waitForFaceValidationReady();
         readyFrame = await captureFaceSnapshot();
       } catch (error) {
         setFaceModalStatus(error.message || 'Unable to capture the current face.', 'error');
@@ -4531,6 +4509,8 @@ async function startCamera(type) {
         const attendanceSaved = await recordAttendance(type, readyFrame, descriptor, pendingAttendanceEventType);
         logFaceAttempt(type, attendanceSaved ? 'success' : 'failed', attendanceSaved ? 'Face verified' : 'Attendance event was not recorded', { attendanceType: pendingAttendanceEventType || type });
         if (attendanceSaved) {
+          const eventLabel = STUDENT_ATTENDANCE_EVENTS.find(event => event.action === pendingAttendanceEventType)?.label || 'Attendance';
+          setFaceModalStatus(`Face matched. ${eventLabel} recorded.`, 'success');
           setTimeout(() => {
             closeFaceModal();
             navigateTo(currentPage);
@@ -4542,15 +4522,26 @@ async function startCamera(type) {
       }
     }
   } catch (e) {
-    updateFaceValidationUI({ cameraConnected: false, faceDetected: false, faceCentered: false, lightingGood: false, blurGood: false, ready: false, message: 'Camera permission denied or unavailable.' });
-    setFaceModalStatus('📵 Camera permission denied or unavailable.', 'error');
-    logFaceAttempt(type, 'failed', 'Camera unavailable', { error: e.message });
+    if (!cameraStream) {
+      const denied = e.name === 'NotAllowedError' || e.name === 'SecurityError';
+      const message = denied
+        ? 'Camera access denied. Please allow camera access in your browser.'
+        : `Camera unavailable: ${e.message || 'Please check your camera and try again.'}`;
+      updateFaceValidationUI({ cameraConnected: false, faceDetected: false, faceCentered: false, lightingGood: false, blurGood: false, ready: false, message });
+      setFaceModalStatus(message, 'error');
+      logFaceAttempt(type, 'failed', 'Camera unavailable', { error: e.message });
+    } else {
+      setFaceModalStatus(e.message || 'Face verification could not be completed.', 'error');
+      logFaceAttempt(type, 'failed', 'Face verification unavailable', { error: e.message });
+    }
   }
 }
-async function registerFace(scanData) {
+async function registerFace(scanData, descriptor) {
   try {
-    const descriptor = await getRealFaceDescriptor(scanData);
-    const response = await getFaceRegistrationEndpoint('register', { faceImage: scanData, faceEncoding: JSON.stringify(descriptor), replace: '1' });
+    if (!isFaceDescriptorValid(descriptor)) {
+      throw new Error('A valid face descriptor is required before registration.');
+    }
+    const response = await getFaceRegistrationEndpoint('register', { faceImage: scanData, faceEncoding: JSON.stringify(descriptor) });
   if (!response.success) {
     setFaceModalStatus(response.message || 'Unable to save face registration.', 'error');
     addNotification(response.message || 'Unable to save face registration.', 'warning');
@@ -4566,8 +4557,8 @@ async function registerFace(scanData) {
   if (refImg) refImg.src = savedFaceImage;
   const scanImg = document.getElementById('face-modal-scan-img');
   if (scanImg) scanImg.src = savedFaceImage;
-  setFaceModalStatus('✅ Face registration saved successfully.', 'success');
-  addNotification('Face registration saved successfully.', 'success');
+  setFaceModalStatus('Face registration completed successfully.', 'success');
+  addNotification('Face registration completed successfully.', 'success');
   logFaceAttempt('register', 'success', 'Face registered successfully', { descriptorLength: descriptor.length });
   await loadFaceRegistrationStatus();
   setTimeout(() => {
@@ -4615,8 +4606,12 @@ function formatAttendanceTime(value) {
   const timestamp = String(value || '').trim();
   if (!timestamp || timestamp === '—') return timestamp || '—';
 
-  const match = timestamp.match(/(?:^|[T\s])(\d{1,2}:\d{2})(?::\d{2}(?:\.\d+)?)?(?:\s*(AM|PM))?/i);
-  return match ? `${match[1]}${match[2] ? ` ${match[2].toUpperCase()}` : ''}` : timestamp;
+  const match = timestamp.match(/(?:^|[T\s])(\d{1,2}):(\d{2})(?::\d{2}(?:\.\d+)?)?(?:\s*(AM|PM))?/i);
+  if (!match) return timestamp;
+  const hour = Number(match[1]);
+  const meridiem = match[3]?.toUpperCase() || (hour >= 12 ? 'PM' : 'AM');
+  const hour12 = hour % 12 || 12;
+  return `${String(hour12).padStart(2, '0')}:${match[2]} ${meridiem}`;
 }
 
 // live clock
@@ -4795,9 +4790,6 @@ function openNewCompanyModal() {
   const body = `
     <div class="form-row"><label class="form-label">Company Name <span style="color:#d14343">*</span></label><input class="form-input" id="gen-company-name" type="text" placeholder="Enter company name"></div>
     <div class="form-row"><label class="form-label">Address <span style="color:#d14343">*</span></label><input class="form-input" id="gen-company-address" type="text" placeholder="Enter company address"></div>
-    <div class="form-row"><label class="form-label">Latitude</label><input class="form-input" id="gen-company-lat" type="number" step="any" placeholder="Company latitude"></div>
-    <div class="form-row"><label class="form-label">Longitude</label><input class="form-input" id="gen-company-lng" type="number" step="any" placeholder="Company longitude"></div>
-    <div class="form-row"><label class="form-label">Allowed Radius (meters)</label><input class="form-input" id="gen-company-radius" type="number" min="1" max="10000" step="1" value="100"></div>
     <div class="form-row"><label class="form-label">Contact Person <span style="color:#d14343">*</span></label><input class="form-input" id="gen-company-contact" type="text" placeholder="Enter contact person"></div>
     <div class="form-row"><label class="form-label">Contact Number <span style="color:#d14343">*</span></label><input class="form-input" id="gen-company-phone" type="text" placeholder="Enter contact number"></div>
     <div class="form-row"><label class="form-label">Email</label><input class="form-input" id="gen-company-email" type="email" placeholder="Enter email address"></div>
@@ -4812,9 +4804,6 @@ function editCompany(companyOrIndex) {
   const body = `
     <div class="form-row"><label class="form-label">Company Name <span style="color:#d14343">*</span></label><input class="form-input" id="gen-company-name" type="text" value="${escapeHtml(company.name || '')}"></div>
     <div class="form-row"><label class="form-label">Address <span style="color:#d14343">*</span></label><input class="form-input" id="gen-company-address" type="text" value="${escapeHtml(company.address || company.location || '')}"></div>
-    <div class="form-row"><label class="form-label">Latitude</label><input class="form-input" id="gen-company-lat" type="number" step="any" value="${escapeHtml(company.latitude ?? '')}"></div>
-    <div class="form-row"><label class="form-label">Longitude</label><input class="form-input" id="gen-company-lng" type="number" step="any" value="${escapeHtml(company.longitude ?? '')}"></div>
-    <div class="form-row"><label class="form-label">Allowed Radius (meters)</label><input class="form-input" id="gen-company-radius" type="number" min="1" max="10000" step="1" value="${escapeHtml(company.allowed_radius_meters ?? 100)}"></div>
     <div class="form-row"><label class="form-label">Contact Person <span style="color:#d14343">*</span></label><input class="form-input" id="gen-company-contact" type="text" value="${escapeHtml(company.contact_person || company.contact || '')}"></div>
     <div class="form-row"><label class="form-label">Contact Number <span style="color:#d14343">*</span></label><input class="form-input" id="gen-company-phone" type="text" value="${escapeHtml(company.contact_phone || company.phone || '')}"></div>
     <div class="form-row"><label class="form-label">Email</label><input class="form-input" id="gen-company-email" type="email" value="${escapeHtml(company.contact_email || company.email || '')}"></div>
@@ -4826,9 +4815,6 @@ function editCompany(companyOrIndex) {
 async function saveCompany(mode, index = null) {
   const name = document.getElementById('gen-company-name')?.value.trim();
   const address = document.getElementById('gen-company-address')?.value.trim();
-  const latitude = document.getElementById('gen-company-lat')?.value.trim();
-  const longitude = document.getElementById('gen-company-lng')?.value.trim();
-  const allowedRadius = document.getElementById('gen-company-radius')?.value.trim() || '100';
   const contact = document.getElementById('gen-company-contact')?.value.trim();
   const phone = document.getElementById('gen-company-phone')?.value.trim();
   const email = document.getElementById('gen-company-email')?.value.trim();
@@ -4848,9 +4834,6 @@ async function saveCompany(mode, index = null) {
     name,
     address,
     location: address,
-    latitude: latitude || '',
-    longitude: longitude || '',
-    allowed_radius_meters: allowedRadius,
     contact_person: contact,
     contact_phone: phone,
     contact_email: email,

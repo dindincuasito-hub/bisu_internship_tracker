@@ -1,5 +1,7 @@
 <?php
 
+date_default_timezone_set('Asia/Manila');
+
 function getDbConfig(): array
 {
     return [
@@ -41,6 +43,8 @@ function getDbConnection(bool $initializeSchema = true, bool $createMissingDatab
             throw $e;
         }
     }
+
+    $pdo->exec("SET time_zone = '+08:00'");
 
     if ($initializeSchema) {
         initializeDatabase($pdo);
@@ -285,9 +289,6 @@ function initializeDatabase(PDO $pdo): void
             contact_email VARCHAR(160) DEFAULT '',
             contact_phone VARCHAR(60) DEFAULT '',
             address TEXT DEFAULT NULL,
-            latitude DECIMAL(10,8) DEFAULT NULL,
-            longitude DECIMAL(11,8) DEFAULT NULL,
-            allowed_radius_meters INT NOT NULL DEFAULT 100,
             status ENUM('Active','Inactive') NOT NULL DEFAULT 'Active',
             created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
             UNIQUE KEY company_name_unique (name)
@@ -297,17 +298,6 @@ function initializeDatabase(PDO $pdo): void
     $contactPersonCheck = $pdo->query("SELECT COUNT(*) AS count FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'companies' AND COLUMN_NAME = 'contact_person'")->fetch();
     if ($contactPersonCheck && intval($contactPersonCheck['count']) === 0) {
         $pdo->exec("ALTER TABLE companies ADD COLUMN contact_person VARCHAR(160) NOT NULL DEFAULT '' AFTER location");
-    }
-
-    $companyColumns = $pdo->query("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='companies'")->fetchAll(PDO::FETCH_COLUMN);
-    if (!in_array('latitude', $companyColumns, true)) {
-        $pdo->exec("ALTER TABLE companies ADD COLUMN latitude DECIMAL(10,8) DEFAULT NULL AFTER address");
-    }
-    if (!in_array('longitude', $companyColumns, true)) {
-        $pdo->exec("ALTER TABLE companies ADD COLUMN longitude DECIMAL(11,8) DEFAULT NULL AFTER latitude");
-    }
-    if (!in_array('allowed_radius_meters', $companyColumns, true)) {
-        $pdo->exec("ALTER TABLE companies ADD COLUMN allowed_radius_meters INT NOT NULL DEFAULT 100 AFTER longitude");
     }
 
     $companyStatusType = $pdo->query("SELECT COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='companies' AND COLUMN_NAME='status'")->fetchColumn();
@@ -383,40 +373,12 @@ function initializeDatabase(PDO $pdo): void
             duration_minutes INT DEFAULT NULL,
             face_snapshot_in LONGTEXT DEFAULT NULL,
             face_snapshot_out LONGTEXT DEFAULT NULL,
-            time_in_latitude DECIMAL(10,8) DEFAULT NULL,
-            time_in_longitude DECIMAL(11,8) DEFAULT NULL,
-            time_in_accuracy DECIMAL(10,2) DEFAULT NULL,
-            time_in_address VARCHAR(500) DEFAULT NULL,
-            time_in_distance DECIMAL(10,2) DEFAULT NULL,
-            time_in_distance_meters DECIMAL(10,2) DEFAULT NULL,
-            time_in_location_status ENUM('Verified','Not Verified','Pending') NOT NULL DEFAULT 'Pending',
-            time_out_latitude DECIMAL(10,8) DEFAULT NULL,
-            time_out_longitude DECIMAL(11,8) DEFAULT NULL,
-            time_out_accuracy DECIMAL(10,2) DEFAULT NULL,
-            time_out_address VARCHAR(500) DEFAULT NULL,
-            time_out_distance DECIMAL(10,2) DEFAULT NULL,
-            time_out_distance_meters DECIMAL(10,2) DEFAULT NULL,
-            time_out_location_status ENUM('Verified','Not Verified','Pending') NOT NULL DEFAULT 'Pending',
             time_out_verification_status ENUM('Verified','Failed','Pending') NOT NULL DEFAULT 'Pending',
             afternoon_time_in DATETIME DEFAULT NULL,
             afternoon_time_out DATETIME DEFAULT NULL,
             afternoon_face_snapshot_in LONGTEXT DEFAULT NULL,
             afternoon_face_snapshot_out LONGTEXT DEFAULT NULL,
-            afternoon_time_in_latitude DECIMAL(10,8) DEFAULT NULL,
-            afternoon_time_in_longitude DECIMAL(11,8) DEFAULT NULL,
-            afternoon_time_in_accuracy DECIMAL(10,2) DEFAULT NULL,
-            afternoon_time_in_address VARCHAR(500) DEFAULT NULL,
-            afternoon_time_in_distance DECIMAL(10,2) DEFAULT NULL,
-            afternoon_time_in_distance_meters DECIMAL(10,2) DEFAULT NULL,
-            afternoon_time_in_location_status ENUM('Verified','Not Verified','Pending') NOT NULL DEFAULT 'Pending',
             afternoon_time_in_verification_status ENUM('Verified','Failed','Pending') NOT NULL DEFAULT 'Pending',
-            afternoon_time_out_latitude DECIMAL(10,8) DEFAULT NULL,
-            afternoon_time_out_longitude DECIMAL(11,8) DEFAULT NULL,
-            afternoon_time_out_accuracy DECIMAL(10,2) DEFAULT NULL,
-            afternoon_time_out_address VARCHAR(500) DEFAULT NULL,
-            afternoon_time_out_distance DECIMAL(10,2) DEFAULT NULL,
-            afternoon_time_out_distance_meters DECIMAL(10,2) DEFAULT NULL,
-            afternoon_time_out_location_status ENUM('Verified','Not Verified','Pending') NOT NULL DEFAULT 'Pending',
             afternoon_time_out_verification_status ENUM('Verified','Failed','Pending') NOT NULL DEFAULT 'Pending',
             verification_status ENUM('Verified','Failed','Pending') NOT NULL DEFAULT 'Pending',
             status ENUM('Present','Late','Absent','Excused') NOT NULL DEFAULT 'Present',
@@ -428,28 +390,6 @@ function initializeDatabase(PDO $pdo): void
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;"
     );
     try {
-        $attendanceColumns = $pdo->query("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='attendance_logs'")->fetchAll(PDO::FETCH_COLUMN);
-        $attendanceMigrations = [
-            ['time_in_latitude', "ALTER TABLE attendance_logs ADD COLUMN time_in_latitude DECIMAL(10,8) DEFAULT NULL AFTER face_snapshot_out"],
-            ['time_in_longitude', "ALTER TABLE attendance_logs ADD COLUMN time_in_longitude DECIMAL(11,8) DEFAULT NULL AFTER time_in_latitude"],
-            ['time_in_accuracy', "ALTER TABLE attendance_logs ADD COLUMN time_in_accuracy DECIMAL(10,2) DEFAULT NULL AFTER time_in_longitude"],
-            ['time_in_address', "ALTER TABLE attendance_logs ADD COLUMN time_in_address VARCHAR(500) DEFAULT NULL AFTER time_in_accuracy"],
-            ['time_in_distance', "ALTER TABLE attendance_logs ADD COLUMN time_in_distance DECIMAL(10,2) DEFAULT NULL AFTER time_in_accuracy"],
-            ['time_in_distance_meters', "ALTER TABLE attendance_logs ADD COLUMN time_in_distance_meters DECIMAL(10,2) DEFAULT NULL AFTER time_in_distance"],
-            ['time_in_location_status', "ALTER TABLE attendance_logs ADD COLUMN time_in_location_status ENUM('Verified','Not Verified','Pending') NOT NULL DEFAULT 'Pending' AFTER time_in_distance_meters"],
-            ['time_out_latitude', "ALTER TABLE attendance_logs ADD COLUMN time_out_latitude DECIMAL(10,8) DEFAULT NULL AFTER time_in_location_status"],
-            ['time_out_longitude', "ALTER TABLE attendance_logs ADD COLUMN time_out_longitude DECIMAL(11,8) DEFAULT NULL AFTER time_out_latitude"],
-            ['time_out_accuracy', "ALTER TABLE attendance_logs ADD COLUMN time_out_accuracy DECIMAL(10,2) DEFAULT NULL AFTER time_out_longitude"],
-            ['time_out_address', "ALTER TABLE attendance_logs ADD COLUMN time_out_address VARCHAR(500) DEFAULT NULL AFTER time_out_accuracy"],
-            ['time_out_distance', "ALTER TABLE attendance_logs ADD COLUMN time_out_distance DECIMAL(10,2) DEFAULT NULL AFTER time_out_accuracy"],
-            ['time_out_distance_meters', "ALTER TABLE attendance_logs ADD COLUMN time_out_distance_meters DECIMAL(10,2) DEFAULT NULL AFTER time_out_distance"],
-            ['time_out_location_status', "ALTER TABLE attendance_logs ADD COLUMN time_out_location_status ENUM('Verified','Not Verified','Pending') NOT NULL DEFAULT 'Pending' AFTER time_out_distance_meters"],
-        ];
-        foreach ($attendanceMigrations as [$columnName, $sql]) {
-            if (!in_array($columnName, $attendanceColumns, true)) {
-                $pdo->exec($sql);
-            }
-        }
         $verificationColumn = $pdo->query("SHOW COLUMNS FROM attendance_logs LIKE 'verification_status'")->fetch();
         if (!$verificationColumn) {
             $pdo->exec("ALTER TABLE attendance_logs ADD COLUMN verification_status ENUM('Verified','Failed','Pending') NOT NULL DEFAULT 'Pending' AFTER face_snapshot_out");
@@ -465,21 +405,7 @@ function initializeDatabase(PDO $pdo): void
         'afternoon_time_out' => 'ALTER TABLE attendance_logs ADD COLUMN afternoon_time_out DATETIME DEFAULT NULL',
         'afternoon_face_snapshot_in' => 'ALTER TABLE attendance_logs ADD COLUMN afternoon_face_snapshot_in LONGTEXT DEFAULT NULL',
         'afternoon_face_snapshot_out' => 'ALTER TABLE attendance_logs ADD COLUMN afternoon_face_snapshot_out LONGTEXT DEFAULT NULL',
-        'afternoon_time_in_latitude' => 'ALTER TABLE attendance_logs ADD COLUMN afternoon_time_in_latitude DECIMAL(10,8) DEFAULT NULL',
-        'afternoon_time_in_longitude' => 'ALTER TABLE attendance_logs ADD COLUMN afternoon_time_in_longitude DECIMAL(11,8) DEFAULT NULL',
-        'afternoon_time_in_accuracy' => 'ALTER TABLE attendance_logs ADD COLUMN afternoon_time_in_accuracy DECIMAL(10,2) DEFAULT NULL',
-        'afternoon_time_in_address' => 'ALTER TABLE attendance_logs ADD COLUMN afternoon_time_in_address VARCHAR(500) DEFAULT NULL',
-        'afternoon_time_in_distance' => 'ALTER TABLE attendance_logs ADD COLUMN afternoon_time_in_distance DECIMAL(10,2) DEFAULT NULL',
-        'afternoon_time_in_distance_meters' => 'ALTER TABLE attendance_logs ADD COLUMN afternoon_time_in_distance_meters DECIMAL(10,2) DEFAULT NULL',
-        'afternoon_time_in_location_status' => "ALTER TABLE attendance_logs ADD COLUMN afternoon_time_in_location_status ENUM('Verified','Not Verified','Pending') NOT NULL DEFAULT 'Pending'",
         'afternoon_time_in_verification_status' => "ALTER TABLE attendance_logs ADD COLUMN afternoon_time_in_verification_status ENUM('Verified','Failed','Pending') NOT NULL DEFAULT 'Pending'",
-        'afternoon_time_out_latitude' => 'ALTER TABLE attendance_logs ADD COLUMN afternoon_time_out_latitude DECIMAL(10,8) DEFAULT NULL',
-        'afternoon_time_out_longitude' => 'ALTER TABLE attendance_logs ADD COLUMN afternoon_time_out_longitude DECIMAL(11,8) DEFAULT NULL',
-        'afternoon_time_out_accuracy' => 'ALTER TABLE attendance_logs ADD COLUMN afternoon_time_out_accuracy DECIMAL(10,2) DEFAULT NULL',
-        'afternoon_time_out_address' => 'ALTER TABLE attendance_logs ADD COLUMN afternoon_time_out_address VARCHAR(500) DEFAULT NULL',
-        'afternoon_time_out_distance' => 'ALTER TABLE attendance_logs ADD COLUMN afternoon_time_out_distance DECIMAL(10,2) DEFAULT NULL',
-        'afternoon_time_out_distance_meters' => 'ALTER TABLE attendance_logs ADD COLUMN afternoon_time_out_distance_meters DECIMAL(10,2) DEFAULT NULL',
-        'afternoon_time_out_location_status' => "ALTER TABLE attendance_logs ADD COLUMN afternoon_time_out_location_status ENUM('Verified','Not Verified','Pending') NOT NULL DEFAULT 'Pending'",
         'afternoon_time_out_verification_status' => "ALTER TABLE attendance_logs ADD COLUMN afternoon_time_out_verification_status ENUM('Verified','Failed','Pending') NOT NULL DEFAULT 'Pending'",
     ];
     $attendanceEventExistingColumns = $pdo->query("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='attendance_logs'")->fetchAll(PDO::FETCH_COLUMN);

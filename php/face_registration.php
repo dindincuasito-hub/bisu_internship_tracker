@@ -89,6 +89,19 @@ function storedFaceImageIsValid(string $storedPath): bool
         && ($imageInfo[1] ?? 0) >= 120;
 }
 
+function faceEncodingIsValid($encoding): bool
+{
+    if (!is_array($encoding) || count($encoding) !== 128) {
+        return false;
+    }
+    foreach ($encoding as $value) {
+        if (!is_numeric($value) || !is_finite((float)$value)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 function faceImageUrl(string $storedPath): string
 {
     if (!str_starts_with($storedPath, 'uploads/')) {
@@ -120,9 +133,6 @@ $studentId = trim((string)($sessionUser['student_id'] ?? ''));
 if ($action === 'status') {
     try {
         $pdo = getDbConnection(false, false);
-        if ($studentId === '') {
-            throw new RuntimeException('Student ID is missing from the authenticated session.');
-        }
         $userStmt = $pdo->prepare('SELECT id, name, email, username, role, status, student_id FROM users WHERE id=? AND role="student" AND status="Active" LIMIT 1');
         $userStmt->execute([$userId]);
         $user = $userStmt->fetch();
@@ -160,23 +170,29 @@ if ($action === 'status') {
         $registrationStatus = trim((string)($registration['status'] ?? 'Not Registered'));
         $isRegistered = strcasecmp($registrationStatus, 'Registered') === 0;
         $imageValid = !empty($registration['face_image']) && storedFaceImageIsValid($registration['face_image']);
+        $faceEncodingValid = faceEncodingIsValid(json_decode((string)($registration['face_encoding'] ?? ''), true));
+        $registrationValid = $isRegistered && $imageValid && $faceEncodingValid;
+        $displayStatus = $isRegistered && !$registrationValid ? 'Needs Repair' : $registrationStatus;
         if (!$imageValid) {
             $physicalPath = dirname(__DIR__) . '/' . ($registration['face_image'] ?? '');
             error_log('Invalid registered face image: student_id=' . $user['student_id'] . ', database path=' . ($registration['face_image'] ?? '') . ', physical path=' . $physicalPath . ', file_exists=' . (is_file($physicalPath) ? 'TRUE' : 'FALSE'));
         }
         echo json_encode([
             'success' => true,
-            'registered' => $isRegistered,
-            'status' => $registrationStatus,
+            'registered' => $registrationValid,
+            'registrationLocked' => $isRegistered,
+            'status' => $displayStatus,
             'registrationDate' => $registration['registered_at'],
             'registeredBy' => $registration['registered_by'],
             'remarks' => $registration['remarks'],
             'faceImage' => faceImageUrl($registration['face_image']),
             'face_image' => $registration['face_image'],
             'imageValid' => $imageValid,
-            'faceEncoding' => $registration['face_encoding'] ?? null,
+            'faceEncodingValid' => $faceEncodingValid,
             'history' => getFaceRegistrationHistory($pdo, (int)$user['id']),
-            'message' => $isRegistered && !$imageValid ? 'Registered face image could not be loaded. Please contact your coordinator.' : null
+            'message' => $isRegistered && !$imageValid
+                ? 'Registered face image could not be loaded. Please contact your coordinator.'
+                : ($isRegistered && !$faceEncodingValid ? 'Your face is not registered. Please contact your coordinator.' : null)
         ]);
         exit;
     } catch (Throwable $e) {
@@ -209,7 +225,7 @@ if ($action === 'register') {
         exit;
     }
     $encoding = json_decode($faceEncoding, true);
-    if (!is_array($encoding) || count($encoding) !== 128 || count(array_filter($encoding, 'is_numeric')) !== 128) {
+    if (!faceEncodingIsValid($encoding)) {
         http_response_code(400);
         echo json_encode(['success' => false, 'message' => 'A valid face encoding is required.']);
         exit;
