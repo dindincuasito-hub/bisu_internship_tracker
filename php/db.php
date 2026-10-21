@@ -4,13 +4,45 @@ date_default_timezone_set('Asia/Manila');
 
 function getDbConfig(): array
 {
-    return [
+    $config = [
         'host' => '127.0.0.1',
         'dbname' => 'bisu_internship_tracker',
         'user' => 'root',
         'pass' => '',
         'charset' => 'utf8mb4',
     ];
+
+    // Deployment creates this ignored file from the hosting secrets. Keeping
+    // credentials outside the repository lets the same code work locally and
+    // on the production server.
+    $localConfigFile = __DIR__ . '/db.local.php';
+    if (is_file($localConfigFile)) {
+        $localConfig = require $localConfigFile;
+        if (is_array($localConfig)) {
+            foreach (array_keys($config) as $key) {
+                if (array_key_exists($key, $localConfig) && is_string($localConfig[$key])) {
+                    $config[$key] = $localConfig[$key];
+                }
+            }
+        }
+    }
+
+    // Environment variables can override db.local.php for managed hosts.
+    $environmentKeys = [
+        'host' => 'DB_HOST',
+        'dbname' => 'DB_NAME',
+        'user' => 'DB_USER',
+        'pass' => 'DB_PASS',
+        'charset' => 'DB_CHARSET',
+    ];
+    foreach ($environmentKeys as $configKey => $environmentKey) {
+        $value = getenv($environmentKey);
+        if ($value !== false) {
+            $config[$configKey] = $value;
+        }
+    }
+
+    return $config;
 }
 
 function getDbConnection(bool $initializeSchema = true, bool $createMissingDatabase = true): PDO
