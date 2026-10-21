@@ -9,14 +9,25 @@ function startSessionIfNeeded(): void
 
     ini_set('session.use_strict_mode', '1');
     ini_set('session.use_only_cookies', '1');
+
+    // The public page is served from /html while APIs are served from /php.
+    // A cookie scoped to one of those folders is never sent to the other,
+    // causing an authenticated user to receive a 401 from every CRUD request.
+    // Scope this first-party session to the site root so the login and API
+    // endpoints use the same session on local XAMPP and HTTPS production.
+    $forwardedProto = strtolower(trim((string)($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '')));
+    $isHttps = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
+        || $forwardedProto === 'https';
     session_set_cookie_params([
         'lifetime' => 0,
-        'path' => '/bisu_internship_tracker/',
-        'secure' => !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off',
+        'path' => '/',
+        'secure' => $isHttps,
         'httponly' => true,
         'samesite' => 'Lax',
     ]);
-    session_start();
+    if (!@session_start()) {
+        error_log('[auth] Unable to start the PHP session. Check the configured session save path and its permissions.');
+    }
 }
 
 if (!defined('BISU_SKIP_AUTO_SESSION') || BISU_SKIP_AUTO_SESSION !== true) {
@@ -41,7 +52,8 @@ function requireAuth(?string $requiredRole = null): array
 
     $user = getSessionUser();
     if (empty($user['id']) || empty($user['role'])) {
-        logAuthError('Missing session data for access request.');
+        logAuthError('Missing session data: method=' . ($_SERVER['REQUEST_METHOD'] ?? 'unknown')
+            . ' endpoint=' . basename((string)($_SERVER['SCRIPT_NAME'] ?? 'unknown')));
         throw new RuntimeException('Authentication required');
     }
 
@@ -61,6 +73,9 @@ function requireAuth(?string $requiredRole = null): array
 function startUserSession(array $user): void
 {
     startSessionIfNeeded();
+    if (session_status() !== PHP_SESSION_ACTIVE) {
+        throw new RuntimeException('Unable to establish a secure session.');
+    }
     session_regenerate_id(true);
     $companyIds = [];
     if (!empty($user['company_ids']) && is_array($user['company_ids'])) {
@@ -94,10 +109,20 @@ function startUserSession(array $user): void
 function clearUserSession(): void
 {
     startSessionIfNeeded();
+    if (session_status() !== PHP_SESSION_ACTIVE) {
+        return;
+    }
     $_SESSION = [];
     if (ini_get('session.use_cookies')) {
         $params = session_get_cookie_params();
-        setcookie(session_name(), '', time() - 42000, $params['path'], $params['domain'], $params['secure'], $params['httponly']);
+        setcookie(session_name(), '', [
+            'expires' => time() - 42000,
+            'path' => $params['path'] ?? '/',
+            'domain' => $params['domain'] ?? '',
+            'secure' => (bool)($params['secure'] ?? false),
+            'httponly' => (bool)($params['httponly'] ?? true),
+            'samesite' => $params['samesite'] ?? 'Lax',
+        ]);
     }
     session_destroy();
 }
@@ -105,6 +130,9 @@ function clearUserSession(): void
 function getSessionUser(): ?array
 {
     startSessionIfNeeded();
+    if (session_status() !== PHP_SESSION_ACTIVE) {
+        return null;
+    }
     $user = $_SESSION['user'] ?? null;
     if ($user) {
         $lifetime = max(1, (int)ini_get('session.gc_maxlifetime'));

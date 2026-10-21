@@ -119,6 +119,9 @@ function requireSession(): array
 {
     $user = getSessionUser();
     if (empty($user)) {
+        $resource = preg_replace('/[^a-z_]/i', '', (string)($_GET['resource'] ?? ''));
+        error_log('[api] Unauthorized request: method=' . ($_SERVER['REQUEST_METHOD'] ?? 'unknown')
+            . ' resource=' . substr($resource, 0, 80));
         sendError('Unauthorized. Please log in.', 401);
     }
     return $user;
